@@ -1,24 +1,41 @@
-# 项目方向
+# Project direction
 
-本文记录已经确定的迁移方向；具体接口和平台适配以实现、测试及发布说明为准。
+This document describes the migration goals. The implementation, tests, and
+release notes define which features are currently available.
 
-- 项目与 PyPI 发行包名称为 `cocoa-py`，已通过正式 PyPI 首次发布确认可用。
-- 公开模块使用顶层名称：`audio`、`scene`、`coreml`、`photos` 等，不要求 `cocoa.` 前缀。
-- 一个源码仓库统一维护和发布；Pythona 是使用者，在 App 构建时集成同一份源码。
-- macOS 支持普通桌面 CPython，包括终端、VS Code 和 PyCharm 环境。
-- 其他 iOS Python IDE 可以在构建时集成，宿主接入保持独立。
-- 保持各模块独立导入，统一打包不会预先导入全部模块；资源按实际调用初始化。
-- 系统接口采用原生 Objective-C / Objective-C++ 桥接，Python 层负责组合逻辑；不依赖 Rubicon-ObjC。
-- 现有 ioskit 不作为兼容性基准，其系统能力 API 可以重新设计。现有 Pythona 实现优先复用。
-- `scene` 是自有 Metal 场景引擎；迁移需要包含着色器资源和物理组件。
-- 平台适配需要覆盖线程调度、窗口与事件循环、权限、取消、错误、文件访问和资源生命周期。
-- 只在平台实际提供能力时提供对应操作；不把 iOS 特有传感器接口视为 macOS 已支持。
-- 开发中不运行模拟器。macOS 使用本机验证；iOS 构建检查和用户真机验证分开记录。
+- The project and PyPI distribution are named `cocoa-py`. The first production
+  PyPI upload successfully registered this name.
+- Public modules use top-level names such as `audio`, `scene`, `coreml`, and
+  `photos`, without a `cocoa.` prefix.
+- A single source repository maintains and releases the modules. Pythona will
+  consume the same source during its app build.
+- macOS support targets ordinary desktop CPython, including terminal sessions,
+  VS Code, and PyCharm.
+- Other iOS Python IDEs can integrate the modules at build time. Host integration
+  remains separate from the module implementations.
+- Modules are imported independently. A shared distribution does not preload
+  every module; resources are initialized when an operation needs them.
+- Native Objective-C and Objective-C++ bridges provide system operations, while
+  Python implements higher-level composition. Rubicon-ObjC is not a dependency.
+- The previous ioskit API is not a compatibility baseline. Its system APIs can
+  be redesigned, reusing existing Pythona implementations where appropriate.
+- `scene` uses a custom Metal rendering engine. Its migration must include shader
+  resources and physics components.
+- Platform integration must cover thread dispatch, windows and event loops,
+  permissions, cancellation, errors, file access, and resource lifetimes.
+- Operations depend on actual platform capabilities. iOS-specific sensor APIs
+  must not be presented as available on macOS without an implementation.
 
-## 首次发布
+## Initial release
 
-`0.1.0a1` 是用于确认构建、发布和独立使用链路的 Core ML 预发布版本。
-其范围是 macOS、标准 CPython 3.14 和顶层 `coreml`，不是完整模块集合。
-源码分发包包含构建源码及实际模型推理测试，wheel 提供 Apple Silicon 原生扩展。
-正式 PyPI 已接受首次发布，构建、上传、下载校验和独立安装链路已验证。
-接下来的迁移需要把其他模块移入本仓库，并让 Pythona 消费这里维护的同一份源码。
+`0.1.0a1` is a Core ML preview that validates building, publishing, and using the
+extension independently. It provides the top-level `coreml` module for macOS
+and standard CPython 3.14; it does not yet contain the full module collection.
+
+The source distribution includes native build sources and real model inference
+tests. The wheel contains an Apple Silicon native extension. The first release
+has been published to production PyPI, and its downloads and installation have
+been verified.
+
+The remaining migration will bring the other modules into this repository and
+switch Pythona to the implementations maintained here.

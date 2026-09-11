@@ -26,5 +26,9 @@ classifiers = [
 [project.optional-dependencies]
 coreml = ["numpy>=2.3.3,<3"]
 
+[project.urls]
+Source = "https://github.com/Yosorable/cocoa-py"
+Issues = "https://github.com/Yosorable/cocoa-py/issues"
+
 [tool.setuptools]
 packages = []

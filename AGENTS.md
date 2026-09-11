@@ -1,0 +1,55 @@
+# cocoa-py contributor guide
+
+## Project scope
+
+`cocoa-py` is one distribution with independently imported top-level modules.
+Keep module implementations independent of Pythona and other host applications;
+host integration belongs in a separate layer.
+
+Read `README.md` for the current release scope and supported environments, and
+`docs/architecture.md` for the migration direction. Planned modules and platforms
+must not be documented as already available.
+
+## Source layout
+
+- `native/coreml/`: the Objective-C++ Core ML extension and its registration header.
+- `setup.py`: native compiler, linker, architecture, and deployment target settings.
+- `pyproject.toml`: distribution metadata and build and runtime dependencies.
+- `MANIFEST.in`: additional files included in the source distribution.
+- `tests/test_coreml.py`: public API tests using real model compilation and inference.
+- `tests/CoreMLFixtures/CoreMLFixtures.zip`: small generated models used by the tests.
+- `docs/releases/`: published artifact details and validation records.
+
+## Native boundaries
+
+- Validate Python inputs before passing them to Apple frameworks, and translate
+  native failures into Python exceptions.
+- Hold the GIL whenever accessing Python objects or interpreter state. Keep
+  Python object access outside any section that releases the GIL.
+- Preserve object ownership across Python, NumPy, and Objective-C boundaries,
+  including failure paths and temporary buffer lifetimes.
+- Preserve both the standalone `PyInit_coreml` entry point and the
+  `registerCoreMLModule` hook used for embedded registration.
+- Keep model compilation and loading behind explicit API calls. Importing the
+  module must not start inference or request user interaction.
+- When changing array conversion, account for strides, dtype, byte order, shape,
+  and image channel layout. Extend the relevant public API regression coverage.
+
+## Validation
+
+For native code or packaging changes, use a virtual environment with standard
+CPython 3.14 on macOS and Apple's command-line tools and SDK:
+
+```sh
+python3.14 -m pip install build
+MACOSX_DEPLOYMENT_TARGET=14.0 python3.14 -m build
+python3.14 -m pip install --force-reinstall '.[coreml]'
+python3.14 -m unittest discover -s tests -v
+```
+
+Tests use the bundled models and exercise actual Core ML compilation and
+inference. For packaging changes, also inspect the source archive and wheel
+contents, and verify that the wheel platform tag matches the native deployment
+target. Record which systems were actually tested separately from the declared
+minimum deployment target. Documentation-only edits need relevant content and
+link checks, without rebuilding the native extension.
