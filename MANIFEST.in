@@ -1,0 +1,4 @@
+include native/coreml/*.h
+include native/coreml/*.mm
+include tests/test_coreml.py
+include tests/CoreMLFixtures/CoreMLFixtures.zip
