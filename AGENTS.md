@@ -14,7 +14,8 @@ must not be documented as already available.
 
 See `docs/architecture.md` for the canonical source map. Python wrappers and
 shader resources live under `python/`, native implementations under `native/`.
-`tools/install_embedded.py` copies wrappers and metadata for an embedded host.
+`tools/build_ios_wheel.py` builds a device wheel with a supplied Python.framework.
+`tools/install_embedded.py` supports optional source-based host integration.
 The macOS runner is a separate executable and must not enter an iOS source target.
 
 ## Native boundaries
@@ -31,6 +32,10 @@ The macOS runner is a separate executable and must not enter an iOS source targe
   module must not start inference or request user interaction.
 - When changing array conversion, account for strides, dtype, byte order, shape,
   and image channel layout. Extend the relevant public API regression coverage.
+- iOS wheels must not depend on host-specific symbols. Optional file-access
+  hooks are resolved at runtime; preserve their paired asynchronous lifetime.
+- Package scene shaders with the distribution. A wheel must not require the
+  host to compile shader source into its application target.
 
 ## Validation
 
@@ -51,3 +56,7 @@ contents, and verify that the wheel platform tag matches the native deployment
 target. Record which systems were actually tested separately from the declared
 minimum deployment target. Documentation-only edits need relevant content and
 link checks, without rebuilding the native extension.
+
+For iOS packaging, build with `tools/build_ios_wheel.py` and validate the result
+using `tests/test_ios_wheel.py` with `COCOA_PY_IOS_WHEEL` set to its path. Check
+the native platform, architecture, Python linkage, resources and RECORD hashes.

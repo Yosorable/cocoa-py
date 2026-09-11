@@ -60,11 +60,11 @@ class Library:
             self._handle = _metal.create_library(path=str(path))
         elif source is not None:
             if source == "__default__":
-                import sys
-                if sys.platform == "darwin":
-                    path = Path(__file__).with_name("_resources") / "SceneShaders.metal"
-                    self._handle = _metal.create_library(path=str(path))
-                    return
+                resources = Path(__file__).with_name("_resources")
+                compiled = resources / "SceneShaders.metallib"
+                path = compiled if compiled.is_file() else resources / "SceneShaders.metal"
+                self._handle = _metal.create_library(path=str(path))
+                return
             self._handle = _metal.create_library(source=source)
         else:
             raise ValueError("Either source or path must be provided")

@@ -6,6 +6,7 @@
 #include <chrono>
 #include <thread>
 #include <utility>
+#include <dlfcn.h>
 
 #define COCOA_PY_UIKIT (TARGET_OS_IOS || TARGET_OS_TV || TARGET_OS_VISION)
 
@@ -35,22 +36,37 @@ static inline void CocoaPyPumpEvents() {
 }
 #endif
 
-// Optional host hooks. Embedded hosts may manage security-scoped bookmarks;
-// desktop extensions use Foundation's scoped URL access when no hook is linked.
-extern "C" void *CocoaPyBeginFileAccess(const char *) __attribute__((weak_import));
-extern "C" void CocoaPyEndFileAccess(void *) __attribute__((weak_import));
+// Resolve optional host hooks at runtime. Wheels must not link against a host
+// application's symbols. Hosts export both functions before using the library.
+struct CocoaPyFileAccessHooks {
+    using Begin = void *(*)(const char *);
+    using End = void (*)(void *);
+    Begin begin;
+    End end;
+};
+
+static inline const CocoaPyFileAccessHooks &CocoaPyGetFileAccessHooks() {
+    static const CocoaPyFileAccessHooks hooks = {
+        reinterpret_cast<CocoaPyFileAccessHooks::Begin>(dlsym(RTLD_DEFAULT, "CocoaPyBeginFileAccess")),
+        reinterpret_cast<CocoaPyFileAccessHooks::End>(dlsym(RTLD_DEFAULT, "CocoaPyEndFileAccess")),
+    };
+    return hooks;
+}
 
 struct CocoaPyFileAccess {
     void *token = nullptr;
+    CocoaPyFileAccessHooks::End end = nullptr;
     __strong NSURL *scopedURL = nil;
     explicit CocoaPyFileAccess(NSURL *url) {
-        if (CocoaPyBeginFileAccess && CocoaPyEndFileAccess)
-            token = CocoaPyBeginFileAccess(url.path.UTF8String);
-        else if ([url startAccessingSecurityScopedResource])
+        const auto &hooks = CocoaPyGetFileAccessHooks();
+        if (hooks.begin && hooks.end) {
+            end = hooks.end;
+            token = hooks.begin(url.path.UTF8String);
+        } else if ([url startAccessingSecurityScopedResource])
             scopedURL = url;
     }
     void close() {
-        if (auto value = std::exchange(token, nullptr)) CocoaPyEndFileAccess(value);
+        if (auto value = std::exchange(token, nullptr)) end(value);
         if (scopedURL) { [scopedURL stopAccessingSecurityScopedResource]; scopedURL = nil; }
     }
     ~CocoaPyFileAccess() { close(); }

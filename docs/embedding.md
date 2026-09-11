@@ -1,88 +1,100 @@
 # Embedding in an iOS Python application
 
-The library supports build-time integration with an existing CPython host. It
-does not install native code into an already-distributed iOS application.
-Pythona uses this same integration boundary.
+Install a matching binary wheel **while building the host application**. An
+already-distributed iOS app cannot acquire these native modules just by running
+pip on the device. The host supplies CPython, UIKit's main loop and system
+permission descriptions. Pythona uses this same binary integration boundary.
 
-## Source and compiler setup
+## Obtain or build the wheel
 
-Pin a source revision, for example with a Git submodule. Compile these sources
-into the application or a linked native target:
+The current development artifact is
+`cocoa_py-0.1.0a2-cp314-cp314-ios_17_0_arm64_iphoneos.whl`.
+It targets iOS 17+, arm64 physical devices and ordinary GIL-enabled CPython 3.14.
+It is not a macOS or simulator binary. The published 0.1.0a1 release contains
+Core ML only; the complete 0.1.0a2 distribution has not yet been uploaded to PyPI.
 
-- `native/common/CocoaPy.mm`
-- `native/audio/AudioModule.mm`
-- `native/coreml/CoreMLModule.mm`
-- `native/metal/MetalModule.mm`
-- `native/photos/PhotosModule.mm`
-- `native/physics/PhysicsModule.mm`
-- `native/scene/SceneAccelModule.mm`
-- `native/system/SystemModule.mm`
-- All `.c` files in `native/physics/box2d/src/`
-
-Use Objective-C++17 or newer with ARC for `.mm` files, C17 for Box2D, and an iOS
-17 deployment target. Do **not** compile `native/runner/CocoaPyRunner.mm` into
-the iOS host; it is a separate macOS app executable.
-
-Header search paths must include the host's CPython 3.14 headers, its NumPy
-`_core/include` directory, and Box2D's `include` and `src` directories. NumPy's
-runtime package must be bundled to use Core ML. The interpreter must be a
-standard GIL-enabled build.
-
-Link Foundation, CoreFoundation, UIKit, AVFoundation, AudioToolbox, QuartzCore,
-Metal, ImageIO, Photos, PhotosUI, UniformTypeIdentifiers, CoreML, CoreVideo,
-CoreLocation, CoreMotion and UserNotifications. Most Xcode projects already
-link several of these through their SDK modules.
-
-Compile `python/scene/_resources/SceneShaders.metal` in the app's Metal sources
-phase so it is present in the app's `default.metallib`. It is the canonical
-shader source; do not maintain a second copy.
-
-## Registration and Python files
-
-After `Py_PreInitialize` and before `Py_InitializeFromConfig`, call:
-
-```cpp
-#include "native/common/CocoaPy.h"
-
-if (registerCocoaPyModules() != 0) {
-    // Abort this interpreter initialization transaction.
-}
-```
-
-The hook adds `_audio`, `coreml`, `_metal`, `_photos`, `_scene_accel`, `_physics`
-and `_cocoakit` to CPython's built-in module table. Do not also compile older
-copies of these modules or register them a second time.
-
-Copy Python wrappers into the app's built `site-packages` directory:
+To build from a checkout or unpacked source distribution, use CPython 3.14 on a
+Mac with full Xcode, the Metal toolchain and an iPhoneOS Python.framework that
+includes its matching headers:
 
 ```sh
-python3.14 tools/install_embedded.py /path/to/built/app/python/lib/python3.14/site-packages
+python3.14 -m pip install build
+python3.14 tools/build_ios_wheel.py \
+  --python-framework /path/to/Python.xcframework/ios-arm64/Python.framework
 ```
 
-The installer also includes `cocoa-py` distribution metadata and licenses, so
-`importlib.metadata.version('cocoa-py')` works in the host. Run the installer after
-the host copies its standard library. It excludes the macOS launcher. No wheel
-needs to be installed on the iPhone, and import names stay unchanged.
+This creates a normal wheel in `dist/` containing seven extensions, all Python
+wrappers, scene's precompiled Metal library, distribution metadata, licenses and
+the SDK privacy manifest. Box2D is compiled into the physics extension. The build
+does not include the macOS launcher or invoke a simulator. It does not require a
+Pythona checkout; any matching iPhoneOS Python.framework can be supplied.
 
-## File-access hooks
+## Install and package
 
-If the host manages security-scoped bookmarks, define both C functions:
+Install the wheel into the directory the host copies into its bundled
+`site-packages`. Use target platform options so the Mac build interpreter does
+not select a macOS wheel:
+
+```sh
+python3.14 -m pip install --no-deps --no-compile --only-binary=:all: \
+  --platform ios_17_0_arm64_iphoneos --python-version 3.14 \
+  --implementation cp --abi cp314 --target app_packages \
+  dist/cocoa_py-0.1.0a2-cp314-cp314-ios_17_0_arm64_iphoneos.whl
+```
+
+Use a fresh staging directory when upgrading, then replace the previous
+distribution's files. Hosts using Core ML must also bundle compatible NumPy 2.x
+extensions. Other modules do not require NumPy unless an array helper is used.
+
+Process this directory with CPython's normal iOS build script, as for other
+binary Python packages. It converts each `.so` into a signed framework under
+the app's `Frameworks/` directory, leaving a `.fwork` import marker in
+`site-packages`. It also moves `_cocoakit.xcprivacy` into that framework
+as `PrivacyInfo.xcprivacy`. See the
+[CPython iOS guide](https://docs.python.org/3.14/using/ios.html#binary-extension-modules).
+
+Keep `scene/_resources/SceneShaders.metallib` with the Python package.
+`scene.gpu.Library('__default__')` loads that resource; the host need not
+compile a shader or provide its own `default.metallib`.
+
+Do not compile the library sources into the app or call
+`registerCocoaPyModules()` when using a wheel. Native modules load normally
+when imported. Public calls remain `import audio`, `import coreml` and
+`from scene import ...`; no import hook is required.
+
+## Optional file-access hooks
+
+A host that manages security-scoped bookmarks can export this pair of C
+functions. No cocoa-py header or linked library is needed:
 
 ```cpp
 extern "C" void *CocoaPyBeginFileAccess(const char *path);
 extern "C" void CocoaPyEndFileAccess(void *token);
 ```
 
-Begin must return an owned token or null when no token is needed. End receives
-that same token exactly once. The hooks can run on background threads. A token
-must remain valid independently of any file-browser view, sheet or script run.
+Begin returns an owned token or null when no token is needed. End receives each
+non-null token exactly once. Callbacks can execute on worker threads, must not
+raise language exceptions across the C boundary, and must remain loaded for the
+process lifetime. Retain a token independently of any view, sheet or script run.
 
-The bridges acquire access before path preflight and retain it throughout
-asynchronous file decoding, recording/export, model loading, image loading,
-Photos saving and sharing. For operations with different source and destination
-paths, each required path gets its own token. A share service that already
-started retains its tokens until its completion callback, even if Python stops
-waiting. Without host hooks, Foundation security-scoped URL access is used.
+The wheel resolves both functions with `dlsym(RTLD_DEFAULT, ...)` when file
+access is first needed. Export the functions before using the library. For an
+Xcode app, retain and export the symbols in **both Debug and Release**, for example
+with these additional linker flags:
+
+```text
+$(inherited) -Wl,-u,_CocoaPyBeginFileAccess -Wl,-u,_CocoaPyEndFileAccess -Wl,-export_dynamic
+```
+
+Swift hosts can implement public, nonisolated functions with the corresponding
+`@_cdecl` names. Hosts loading the callbacks from a separate dynamic library
+must load that library globally before using cocoa-py and keep it loaded.
+
+File tokens cover preflight checks and asynchronous audio, model, image, Photos
+and sharing operations. Source and destination each receive access where needed.
+A selected sharing service may continue after Python stops waiting, and retains
+its tokens until the service completes. If either callback is missing, neither
+is used; the library falls back to Foundation security-scoped URL access.
 
 ## Permissions and host lifecycle
 
@@ -112,7 +124,7 @@ Importing these modules does not bypass the host's authorization, entitlements
 or package policy. The host still owns its privacy policy, App Store privacy
 answers, required-reason API declarations, and application lifecycle.
 
-Copy `native/common/CocoaPyPrivacy.bundle` into the app's resources. It declares
+The wheel's `_cocoakit.xcprivacy` declares
 the library's file metadata access, local timing calculations, and disk capacity
 display/write checks. The host must separately declare its own API usage.
 Use device uptime for local timing and storage information for visible capacity
@@ -122,8 +134,20 @@ against the host's actual behavior before distributing an application.
 
 ## Validate the integration
 
-Compile an iPhoneOS device target, verify all registered imports and metadata,
+Compile an iPhoneOS device target, verify all dynamic imports and metadata,
 and run the host's real-device checks. Cover permission acceptance/refusal,
 closing pending UI, bounded sensor streams, microphone shutdown and file access
 outside the app container. Audio routing, interruptions and true sensor data
 require real hardware. macOS bridge tests do not replace those device checks.
+
+## Optional source integration
+
+Hosts that intentionally compile the native sources can still use
+`native/common/CocoaPy.h` and `registerCocoaPyModules()` once after
+`Py_PreInitialize` and before `Py_InitializeFromConfig`. Compile the seven
+module implementation files plus `native/common/CocoaPy.mm` and Box2D's C
+sources, using the corresponding frameworks and flags in `setup.py`. Exclude
+the macOS runner. `tools/install_embedded.py` copies the canonical Python
+wrappers and metadata; also include the SDK privacy bundle in the host resources.
+In this mode scene can compile its packaged Metal source on first use. Do not
+combine source registration and wheel extensions in the same interpreter.

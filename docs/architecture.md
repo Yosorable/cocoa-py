@@ -1,7 +1,7 @@
 # Architecture
 
-`cocoa-py` owns the implementations; host applications consume a pinned source
-revision. Public APIs use top-level Python imports and have no Pythona runtime,
+`cocoa-py` owns the implementations; host applications consume a versioned wheel.
+Source integration is optional. Public APIs use top-level Python imports and have no Pythona runtime,
 Pro entitlement, file-browser, or Rubicon dependency.
 
 ## Source layout
@@ -17,6 +17,7 @@ Pro entitlement, file-browser, or Rubicon dependency.
 - `native/common/`: shared thread/file-access helpers and embedded registration.
 - `native/runner/`: optional macOS app executable for permission-aware Python.
 - `tools/install_embedded.py`: copy Python wrappers and distribution metadata into a host bundle.
+- `tools/build_ios_wheel.py`: compile and package an arm64 iPhoneOS wheel.
 
 ## Native boundaries
 
@@ -38,11 +39,17 @@ not require a live audio device.
 
 ## Hosts and file access
 
-An embedded host registers native modules before initializing CPython and copies
-the canonical Python files at build time. It can supply two C file-access hooks
+An iOS host installs the wheel into its bundled packages at build time. CPython's
+standard iOS packager moves extensions into signed frameworks and leaves `.fwork`
+import markers. There is no built-in registration or library source dependency.
+The wheel includes a precompiled scene shader library and the SDK privacy manifest.
+
+A host can export two optional C file-access hooks, resolved with `dlsym`,
 that retain and release its own security-scoped bookmarks. Tokens cover preflight
 checks and asynchronous I/O, including source and destination where required.
-Without hooks, the desktop implementation uses Foundation scoped-URL access.
+Without a complete pair of hooks, the implementation uses Foundation scoped-URL access.
+Host callbacks must remain loaded for the process lifetime. Each token stores its
+matching release function; worker-thread operations do not call Python.
 
 A sharing service may continue copying files after Python stops waiting. Its
 request retains file-access tokens until the native service reports completion.

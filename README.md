@@ -30,8 +30,8 @@ contains **only Core ML**; installing that version does not install the module
 collection described above.
 
 The current source targets **macOS 14+**, **iOS 17+**, and standard **CPython 3.14
-with the GIL**. macOS wheels are built with Apple's SDK; iOS hosts integrate the
-source when building their application. Native macOS motion sensors are not
+with the GIL**. macOS wheels are built with Apple's SDK; iOS hosts install a
+matching iPhoneOS wheel before packaging their application. Native macOS motion sensors are not
 available and are reported as unsupported.
 
 To build the current development version on a Mac with Xcode command-line tools:
@@ -113,6 +113,18 @@ The UI option briefly opens desktop scene and sharing windows without selecting
 or sharing personal data. `COCOA_PY_NETWORK_TESTS=1` additionally exercises Apple's
 geocoder with a public address. Permission prompts, recording, phone sensors,
 Photos selection and hardware routing are separate device checks.
+
+To produce an iOS wheel with a CPython 3.14 framework for arm64 devices:
+
+```sh
+python3.14 tools/build_ios_wheel.py --python-framework /path/to/ios-arm64/Python.framework
+COCOA_PY_IOS_WHEEL=dist/cocoa_py-0.1.0a2-cp314-cp314-ios_17_0_arm64_iphoneos.whl \
+  python3.14 -m unittest discover -s tests -p test_ios_wheel.py -v
+```
+
+This compiles all seven extensions and the scene shader library. It does not
+build or run a simulator. The iOS wheel excludes the macOS launcher. Version
+`0.1.0a2` artifacts remain local development builds until separately published.
 
 ## License
 
