@@ -5,7 +5,6 @@ import csv
 from email.parser import Parser
 import hashlib
 import io
-import json
 import os
 from pathlib import Path
 import plistlib
@@ -33,7 +32,7 @@ class IOSWheelTests(unittest.TestCase):
             self.assertTrue(wheel.read("scene/_resources/SceneShaders.metallib").startswith(b"MTLB"))
             privacy = plistlib.loads(wheel.read("_cocoa/_system.xcprivacy"))
             self.assertTrue(privacy["NSPrivacyAccessedAPITypes"])
-            self.assertEqual(json.loads(wheel.read("_cocoa/build.json"))["platform"], "ios_17_0_arm64_iphoneos")
+            self.assertNotIn("_cocoa/build.json", names)
             for name, digest, size in csv.reader(io.StringIO(wheel.read(metadata + "/RECORD").decode())):
                 self.assertIn(name, names)
                 if not digest:

@@ -7,11 +7,21 @@ permission descriptions. Pythona uses this same binary integration boundary.
 
 ## Obtain or build the wheel
 
-The current development artifact is
+The 0.1.0a2 iPhoneOS artifact on [PyPI](https://pypi.org/project/cocoa-py/0.1.0a2/) is
 `cocoa_py-0.1.0a2-cp314-cp314-ios_17_0_arm64_iphoneos.whl`.
 It targets iOS 17+, arm64 physical devices and ordinary GIL-enabled CPython 3.14.
-It is not a macOS or simulator binary. The published 0.1.0a1 release contains
-Core ML only; the complete 0.1.0a2 distribution has not yet been uploaded to PyPI.
+It is not a macOS or simulator binary. Download the pinned release on a Mac:
+
+```sh
+python3.14 -m pip download --index-url https://pypi.org/simple \
+  --no-deps --only-binary=:all: --platform ios_17_0_arm64_iphoneos \
+  --python-version 3.14 --implementation cp --abi cp314 \
+  --dest wheels cocoa-py==0.1.0a2
+```
+
+Record the wheel's SHA-256 and verify it when restoring the dependency. The
+release source is identified by the `v0.1.0a2` Git tag. Normal host builds can
+reuse the installed files without contacting PyPI or rebuilding the library.
 
 To build from a checkout or unpacked source distribution, use CPython 3.14 on a
 Mac with full Xcode, the Metal toolchain and an iPhoneOS Python.framework that
@@ -39,7 +49,7 @@ not select a macOS wheel:
 python3.14 -m pip install --no-deps --no-compile --only-binary=:all: \
   --platform ios_17_0_arm64_iphoneos --python-version 3.14 \
   --implementation cp --abi cp314 --target app_packages \
-  dist/cocoa_py-0.1.0a2-cp314-cp314-ios_17_0_arm64_iphoneos.whl
+  wheels/cocoa_py-0.1.0a2-cp314-cp314-ios_17_0_arm64_iphoneos.whl
 ```
 
 Use a fresh staging directory when upgrading, then replace the previous

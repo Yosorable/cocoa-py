@@ -25,27 +25,28 @@ Rubicon-ObjC is not a dependency.
 
 ## Status and installation
 
-The development source is **0.1.0a2**. The published **0.1.0a1** preview on PyPI
-contains **only Core ML**; installing that version does not install the module
-collection described above.
+**0.1.0a2** is an alpha release of the module collection described above.
+It provides Apple Silicon macOS and arm64 iPhoneOS wheels on
+[PyPI](https://pypi.org/project/cocoa-py/0.1.0a2/), plus a source distribution.
+The earlier **0.1.0a1** preview contained only Core ML.
 
 The current source targets **macOS 14+**, **iOS 17+**, and standard **CPython 3.14
 with the GIL**. macOS wheels are built with Apple's SDK; iOS hosts install a
 matching iPhoneOS wheel before packaging their application. Native macOS motion sensors are not
 available and are reported as unsupported.
 
-To build the current development version on a Mac with Xcode command-line tools:
+On an Apple Silicon Mac, install the wheel in a CPython 3.14 environment:
 
 ```sh
-git clone https://github.com/Yosorable/cocoa-py.git
-cd cocoa-py
 python3.14 -m venv .venv
 source .venv/bin/activate
-python -m pip install '.[coreml]'
+python -m pip install 'cocoa-py[coreml]==0.1.0a2'
 ```
 
-The `coreml` extra installs NumPy for inference. Build isolation uses NumPy's
-headers regardless of whether that runtime extra is selected.
+The `coreml` extra installs NumPy for inference. Use `cocoa-py==0.1.0a2` without
+the extra if you do not need NumPy. Installing a matching wheel does not require
+Xcode. Source builds require Apple's development tools and use NumPy headers in
+an isolated build environment.
 
 ## Start using the modules
 
@@ -69,7 +70,7 @@ cocoa-py -m my_package
 The launcher keeps the current virtual environment and runs CPython in a small
 macOS app with the required usage descriptions. It does not install a second
 Python distribution. Ordinary `python` remains suitable for offline audio,
-Core ML inference and scene windows. See [macOS execution](docs/macos.md) for
+Core ML inference and scene windows. See [macOS execution](https://github.com/Yosorable/cocoa-py/blob/main/docs/macos.md) for
 permissions, IDE use and event-loop requirements.
 
 ```python
@@ -85,16 +86,17 @@ with location.watch(distance_filter=10) as updates:
 
 The host application's system permissions apply to scripts running inside it.
 Applications embedding these modules must supply their own usage descriptions
-and lifecycle integration; see [iOS embedding](docs/embedding.md).
+and lifecycle integration; see [iOS embedding](https://github.com/Yosorable/cocoa-py/blob/main/docs/embedding.md).
 
 ## Documentation
 
-- [Module API guide](docs/api.md)
-- [macOS execution and permissions](docs/macos.md)
-- [Embedding in an iOS application](docs/embedding.md)
-- [Architecture and resource ownership](docs/architecture.md)
-- [Third-party code](docs/third-party.md)
-- [Initial PyPI release](docs/releases/0.1.0a1.md)
+- [Module API guide](https://github.com/Yosorable/cocoa-py/blob/main/docs/api.md)
+- [macOS execution and permissions](https://github.com/Yosorable/cocoa-py/blob/main/docs/macos.md)
+- [Embedding in an iOS application](https://github.com/Yosorable/cocoa-py/blob/main/docs/embedding.md)
+- [Architecture and resource ownership](https://github.com/Yosorable/cocoa-py/blob/main/docs/architecture.md)
+- [Third-party code](https://github.com/Yosorable/cocoa-py/blob/main/docs/third-party.md)
+- [0.1.0a2 release](https://github.com/Yosorable/cocoa-py/blob/main/docs/releases/0.1.0a2.md)
+- [Initial Core ML release](https://github.com/Yosorable/cocoa-py/blob/main/docs/releases/0.1.0a1.md)
 
 The Python wrappers contain full signatures and docstrings, available through
 `help(audio.Sound)`, `help(location.Watch)`, and equivalent Python introspection.
@@ -102,6 +104,8 @@ The Python wrappers contain full signatures and docstrings, available through
 ## Build and validate
 
 ```sh
+git clone https://github.com/Yosorable/cocoa-py.git
+cd cocoa-py
 python -m pip install build
 MACOSX_DEPLOYMENT_TARGET=14.0 python -m build
 python -m unittest discover -s tests -v
@@ -123,8 +127,9 @@ COCOA_PY_IOS_WHEEL=dist/cocoa_py-0.1.0a2-cp314-cp314-ios_17_0_arm64_iphoneos.whl
 ```
 
 This compiles all seven extensions and the scene shader library. It does not
-build or run a simulator. The iOS wheel excludes the macOS launcher. Version
-`0.1.0a2` artifacts remain local development builds until separately published.
+build or run a simulator. The iOS wheel excludes the macOS launcher. Published
+versions correspond to Git tags such as `v0.1.0a2`; hosts should pin the release
+version and record the downloaded wheel's SHA-256.
 
 ## License
 

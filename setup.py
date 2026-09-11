@@ -1,7 +1,5 @@
 """Build macOS extensions or an iPhoneOS wheel with Apple's toolchain."""
 
-import hashlib
-import json
 import os
 from pathlib import Path
 import re
@@ -122,20 +120,6 @@ class AppleBuildExt(build_ext):
                 *[arg for arch in sorted(architectures) for arg in ("-arch", arch)],
                 "-framework", "Foundation", "native/runner/CocoaPyRunner.mm", "-o", str(runner),
             ], check=True)
-        source_hash = hashlib.sha256()
-        sources = [Path("setup.py"), Path("pyproject.toml")]
-        sources += [path for directory in ("native", "python") for path in Path(directory).rglob("*")
-                    if path.is_file() and path.suffix in (".py", ".h", ".mm", ".c", ".metal", ".plist", ".xcprivacy")
-                    and not any(part.startswith(".") or part.endswith((".egg-info", ".dist-info"))
-                                or part == "__pycache__" for part in path.parts)]
-        for path in sorted(sources):
-            source_hash.update(path.as_posix().encode() + b"\0" + path.read_bytes() + b"\0")
-        support = output / "_cocoa"
-        support.mkdir(parents=True, exist_ok=True)
-        (support / "build.json").write_text(json.dumps({
-            "platform": wheel_platform, "python_abi": "cp314", "minimum_os": minimum,
-            "source_sha256": source_hash.hexdigest(),
-        }, indent=2) + "\n")
 
 
 def native_extension(name, source, macos=(), ios=(), *, extra_sources=(), include_dirs=()):
