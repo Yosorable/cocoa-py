@@ -2439,7 +2439,7 @@ static PyMethodDef metalMethods[] = {
 
 static struct PyModuleDef metalModule = {
     PyModuleDef_HEAD_INIT,
-    "_metal",
+    "_cocoa._metal",
     "cocoa-py Metal runtime bridge.",
     -1,
     metalMethods,
@@ -2450,5 +2450,5 @@ PyMODINIT_FUNC PyInit__metal(void) {
 }
 
 void registerMetalModule(void) {
-    PyImport_AppendInittab("_metal", PyInit__metal);
+    PyImport_AppendInittab("_cocoa._metal", PyInit__metal);
 }

@@ -5,7 +5,7 @@ import math
 from collections import namedtuple
 from dataclasses import dataclass
 
-import _scene_accel
+from _cocoa import _scene_accel
 from ._engine import normalize_color
 # re-export enums for convenience (canonical home is ._enums)
 from ._enums import (

@@ -11,7 +11,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, Sequence
 
-import _photos
+from _cocoa import _photos
 
 __all__ = [
     "MediaType",

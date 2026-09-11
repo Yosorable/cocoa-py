@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from ._enums import FillRule, LineCap, LineJoin
 
 try:
-    import _scene_accel as _PATH_ACCEL
+    from _cocoa import _scene_accel as _PATH_ACCEL
 except ImportError:
     _PATH_ACCEL = None
 

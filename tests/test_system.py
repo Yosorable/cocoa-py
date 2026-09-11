@@ -12,7 +12,7 @@ import location
 import motion
 import notification
 import share
-from _cocoa_support import Request
+from _cocoa.requests import Request
 
 
 class SystemTests(unittest.TestCase):

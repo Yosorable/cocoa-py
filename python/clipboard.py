@@ -5,7 +5,7 @@ Importing this module never reads the clipboard.
 """
 
 import base64
-from _cocoa_support import call as _call
+from _cocoa.requests import call as _call
 
 __all__ = ["read_text", "write_text", "types", "read_bytes", "write_bytes", "clear"]
 

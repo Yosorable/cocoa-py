@@ -6,7 +6,7 @@ access. Location permissions are requested only by explicit calls.
 """
 
 from dataclasses import dataclass
-from _cocoa_support import Request, Stream, call as _call
+from _cocoa.requests import Request, Stream, call as _call
 
 __all__ = ["Coordinates", "Place", "Watch", "status", "permission", "request_permission",
            "current", "watch", "geocode", "reverse_geocode"]

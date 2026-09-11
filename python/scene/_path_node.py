@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 
-import _scene_accel
+from _cocoa import _scene_accel
 from ._common import _apply, _avg_scale, _color, _rot
 from ._engine import Cmd, KIND_TEX, Texture
 from ._enums import FillRule

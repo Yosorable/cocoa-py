@@ -98,6 +98,6 @@ static PyMethodDef methods[] = {
     {"close", system_close, METH_O, "Cancel and release a request's native resources."},
     {nullptr, nullptr, 0, nullptr}
 };
-static PyModuleDef module = {PyModuleDef_HEAD_INIT, "_cocoakit", "Native Apple system services.", -1, methods};
-PyMODINIT_FUNC PyInit__cocoakit(void) { return PyModule_Create(&module); }
-int registerCocoaSystemModule(void) { return PyImport_AppendInittab("_cocoakit", PyInit__cocoakit); }
+static PyModuleDef module = {PyModuleDef_HEAD_INIT, "_cocoa._system", "Native Apple system services.", -1, methods};
+PyMODINIT_FUNC PyInit__system(void) { return PyModule_Create(&module); }
+int registerCocoaSystemModule(void) { return PyImport_AppendInittab("_cocoa._system", PyInit__system); }

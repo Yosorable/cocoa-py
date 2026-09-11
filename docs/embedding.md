@@ -49,8 +49,10 @@ extensions. Other modules do not require NumPy unless an array helper is used.
 Process this directory with CPython's normal iOS build script, as for other
 binary Python packages. It converts each `.so` into a signed framework under
 the app's `Frameworks/` directory, leaving a `.fwork` import marker in
-`site-packages`. It also moves `_cocoakit.xcprivacy` into that framework
-as `PrivacyInfo.xcprivacy`. See the
+`site-packages`. Private extensions live in `_cocoa/`, so their frameworks have
+names such as `_cocoa._audio.framework`; the public `coreml` extension remains
+top-level. It also moves `_cocoa/_system.xcprivacy` into
+`_cocoa._system.framework/PrivacyInfo.xcprivacy`. See the
 [CPython iOS guide](https://docs.python.org/3.14/using/ios.html#binary-extension-modules).
 
 Keep `scene/_resources/SceneShaders.metallib` with the Python package.
@@ -124,7 +126,7 @@ Importing these modules does not bypass the host's authorization, entitlements
 or package policy. The host still owns its privacy policy, App Store privacy
 answers, required-reason API declarations, and application lifecycle.
 
-The wheel's `_cocoakit.xcprivacy` declares
+The wheel's `_cocoa/_system.xcprivacy` declares
 the library's file metadata access, local timing calculations, and disk capacity
 display/write checks. The host must separately declare its own API usage.
 Use device uptime for local timing and storage information for visible capacity
@@ -148,6 +150,8 @@ Hosts that intentionally compile the native sources can still use
 module implementation files plus `native/common/CocoaPy.mm` and Box2D's C
 sources, using the corresponding frameworks and flags in `setup.py`. Exclude
 the macOS runner. `tools/install_embedded.py` copies the canonical Python
-wrappers and metadata; also include the SDK privacy bundle in the host resources.
+wrappers, including the `_cocoa` package, and metadata; also include the SDK
+privacy bundle in the host resources. Private built-ins are registered by their
+full names such as `_cocoa._audio`, with no top-level `_audio` alias.
 In this mode scene can compile its packaged Metal source on first use. Do not
 combine source registration and wheel extensions in the same interpreter.

@@ -5,7 +5,7 @@
 extern "C" {
 #endif
 
-/// Register the _audio built-in Python module.
+/// Register the _cocoa._audio built-in Python module.
 /// Must be called BEFORE Py_Initialize().
 void registerAudioModule(void);
 

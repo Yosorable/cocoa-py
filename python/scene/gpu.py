@@ -18,7 +18,7 @@ Quick start:
 """
 from __future__ import annotations
 
-import _metal
+from _cocoa import _metal
 from pathlib import Path
 
 from ._enums import Orientation

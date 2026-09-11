@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import time
 
-import _scene_accel
-import _metal
+from _cocoa import _scene_accel
+from _cocoa import _metal
 from . import gesture as gesture_module
 from ._common import (
     _IDENTITY, CollisionInfo, Orientation, Touch, _PHASES, _apply, _color,

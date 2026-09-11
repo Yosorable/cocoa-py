@@ -29,9 +29,9 @@ def _python_library():
 
 
 def _bundle():
-    import _cocoa_support
+    import _cocoa
 
-    source = Path(_cocoa_support.__file__).with_name("_runner")
+    source = Path(_cocoa.__file__).with_name("_runner")
     if not source.is_file():
         raise RuntimeError("The native macOS launcher is missing; install a built cocoa-py wheel")
     root = Path.home() / "Library" / "Application Support" / "cocoa-py"

@@ -54,7 +54,7 @@ Quick start::
     audio.close()
 """
 
-import _audio
+from _cocoa import _audio
 import math as _math
 import operator as _operator
 import os as _os

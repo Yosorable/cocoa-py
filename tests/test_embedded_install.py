@@ -20,9 +20,10 @@ class EmbeddedInstallerTests(unittest.TestCase):
             distribution = next(importlib.metadata.distributions(path=[str(target)]))
             self.assertEqual(distribution.metadata["Name"], "cocoa-py")
             self.assertTrue((target / "scene/_resources/SceneShaders.metal").is_file())
-            self.assertTrue((target / "_cocoa_support/__init__.py").is_file())
+            self.assertTrue((target / "_cocoa/__init__.py").is_file())
+            self.assertTrue((target / "_cocoa/requests.py").is_file())
             self.assertFalse((target / "cocoa_run.py").exists())
-            self.assertFalse((target / "_cocoa_support/_runner").exists())
+            self.assertFalse((target / "_cocoa/_runner").exists())
             self.assertFalse(list(target.rglob("*.egg-info")))
             self.assertFalse(list(target.rglob("*.so")))
             for file in distribution.files:
@@ -46,6 +47,20 @@ class EmbeddedInstallerTests(unittest.TestCase):
             self.assertFalse(obsolete.exists())
             self.assertTrue(unrelated.exists())
             self.assertTrue(outside.exists())
+
+    def test_upgrade_removes_the_previous_request_helper_package(self):
+        with tempfile.TemporaryDirectory() as temporary, redirect_stdout(io.StringIO()):
+            target = Path(temporary)
+            install(target)
+            metadata = next(target.glob("cocoa_py-*.dist-info"))
+            old = target / "_cocoa_support"
+            old.mkdir()
+            (old / "__init__.py").write_text("old = True\n")
+            with (metadata / "RECORD").open("a", newline="") as output:
+                csv.writer(output).writerow(("_cocoa_support/__init__.py", "", ""))
+            install(target)
+            self.assertFalse(old.exists())
+            self.assertTrue((target / "_cocoa/requests.py").is_file())
 
     def test_upgrade_rejects_a_symlink_to_an_outside_directory(self):
         with tempfile.TemporaryDirectory() as temporary, redirect_stdout(io.StringIO()):

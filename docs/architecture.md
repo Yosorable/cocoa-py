@@ -19,6 +19,20 @@ Pro entitlement, file-browser, or Rubicon dependency.
 - `tools/install_embedded.py`: copy Python wrappers and distribution metadata into a host bundle.
 - `tools/build_ios_wheel.py`: compile and package an arm64 iPhoneOS wheel.
 
+## Installed layout
+
+Public imports remain top-level: `audio`, `photos`, `scene`, `coreml`, and the
+system modules. The private `_cocoa` package contains shared Python request
+helpers, launcher resources, and six independently built native extensions:
+`_audio`, `_photos`, `_metal`, `_physics`, `_scene_accel`, and `_system`.
+Core ML remains a top-level native `coreml` module.
+
+`_cocoa/__init__.py` does not import its extensions or request helpers. Each
+public wrapper imports the backend it needs using ordinary package imports;
+no search-path changes or top-level extension aliases are installed. Physics
+continues to load when its public scene classes are first requested. Grouping
+these binaries in a directory does not combine their engine state or dependencies.
+
 ## Native boundaries
 
 Python handles composition, typed results, timeout policy and blocking PCM
@@ -59,7 +73,7 @@ Other location, motion and picker requests stop or dismiss when closed.
 
 Apple frameworks are linked in native extensions, but importing a wrapper does
 not open a window, activate a microphone, read the clipboard, or request location.
-System modules share `_cocoakit`; `audio`, `coreml`, `photos`, and scene components
+System modules share `_cocoa._system`; `audio`, `coreml`, `photos`, and scene components
 use separate extensions. NumPy is initialized only by Core ML or an explicit
 array conversion helper.
 

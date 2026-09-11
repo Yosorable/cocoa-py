@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 
-import _scene_accel
+from _cocoa import _scene_accel
 from ._common import CollisionInfo
 
 _COLL_TYPE = {'circle': 0, 'obb': 1}

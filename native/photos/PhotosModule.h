@@ -5,7 +5,7 @@
 extern "C" {
 #endif
 
-/// Register the _photos built-in Python module.
+/// Register the _cocoa._photos built-in Python module.
 /// Must be called BEFORE Py_Initialize().
 void registerPhotosModule(void);
 

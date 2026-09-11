@@ -5,7 +5,7 @@
 extern "C" {
 #endif
 
-/// Register the _scene_accel built-in Python module.
+/// Register the _cocoa._scene_accel built-in Python module.
 /// Must be called BEFORE Py_Initialize().
 void registerSceneAccelModule(void);
 

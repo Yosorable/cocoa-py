@@ -2078,7 +2078,7 @@ static PyMethodDef physics_methods[] = {
 
 static struct PyModuleDef physics_module_def = {
     PyModuleDef_HEAD_INIT,
-    "_physics",
+    "_cocoa._physics",
     "Box2D v3 physics engine bridge.",
     -1,
     physics_methods
@@ -2112,7 +2112,7 @@ PyMODINIT_FUNC PyInit__physics(void) {
 }
 
 void registerPhysicsModule(void) {
-    PyImport_AppendInittab("_physics", PyInit__physics);
+    PyImport_AppendInittab("_cocoa._physics", PyInit__physics);
 }
 
 } // extern "C"

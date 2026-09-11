@@ -2,7 +2,7 @@
 
 import os
 from dataclasses import dataclass
-from _cocoa_support import Request, seconds
+from _cocoa.requests import Request, seconds
 
 __all__ = ["ShareResult", "ShareRequest", "open", "present"]
 

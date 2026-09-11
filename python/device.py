@@ -1,7 +1,7 @@
 """Read device, battery, and storage information without requesting permissions."""
 
 import os
-from _cocoa_support import call as _call
+from _cocoa.requests import call as _call
 
 __all__ = ["info", "battery", "storage"]
 

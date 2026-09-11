@@ -1,7 +1,7 @@
 """scene._physics — Box2D physics integration (PhysicsWorld, PhysicsBody, PhysicsJoint)."""
 from __future__ import annotations
 
-import _physics
+from _cocoa import _physics
 
 
 # ────────────────────────────── PhysicsBody ───────────────────────────────

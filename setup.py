@@ -110,11 +110,11 @@ class AppleBuildExt(build_ext):
                 "-o", str(resources / "SceneShaders.metallib"),
             ], check=True)
             # The standard CPython packager moves this SDK-wide manifest into
-            # _cocoakit.framework. It covers the complete distribution.
+            # _cocoa._system.framework. It covers the complete distribution.
             shutil.copy2("native/common/CocoaPyPrivacy.bundle/PrivacyInfo.xcprivacy",
-                         output / "_cocoakit.xcprivacy")
+                         output / "_cocoa" / "_system.xcprivacy")
         else:
-            runner = output / "_cocoa_support" / "_runner"
+            runner = output / "_cocoa" / "_runner"
             runner.parent.mkdir(parents=True, exist_ok=True)
             subprocess.run([
                 "xcrun", "clang++", "-std=c++17", "-fobjc-arc", "-O2", "-g0",
@@ -130,7 +130,7 @@ class AppleBuildExt(build_ext):
                                 or part == "__pycache__" for part in path.parts)]
         for path in sorted(sources):
             source_hash.update(path.as_posix().encode() + b"\0" + path.read_bytes() + b"\0")
-        support = output / "_cocoa_support"
+        support = output / "_cocoa"
         support.mkdir(parents=True, exist_ok=True)
         (support / "build.json").write_text(json.dumps({
             "platform": wheel_platform, "python_abi": "cp314", "minimum_os": minimum,
@@ -155,22 +155,22 @@ setup(
                + ([] if is_ios else ["cocoa_run"]),
     entry_points={} if is_ios else {"console_scripts": ["cocoa-py = cocoa_run:main"]},
     ext_modules=[
-        native_extension("_cocoakit", "native/system/SystemModule.mm",
+        native_extension("_cocoa._system", "native/system/SystemModule.mm",
                          ("AppKit", "CoreLocation", "UserNotifications", "IOKit"),
                          ("UIKit", "CoreLocation", "CoreMotion", "UserNotifications")),
         native_extension("coreml", "native/coreml/CoreMLModule.mm",
                          ("CoreML", "CoreVideo"), ("CoreML", "CoreVideo")),
-        native_extension("_audio", "native/audio/AudioModule.mm",
+        native_extension("_cocoa._audio", "native/audio/AudioModule.mm",
                          ("AVFoundation", "AudioToolbox", "CoreAudio", "QuartzCore", "AppKit"),
                          ("AVFoundation", "AudioToolbox", "QuartzCore")),
-        native_extension("_metal", "native/metal/MetalModule.mm",
+        native_extension("_cocoa._metal", "native/metal/MetalModule.mm",
                          ("Metal", "QuartzCore", "ImageIO", "AppKit"),
                          ("Metal", "QuartzCore", "ImageIO", "UIKit")),
-        native_extension("_photos", "native/photos/PhotosModule.mm",
+        native_extension("_cocoa._photos", "native/photos/PhotosModule.mm",
                          ("AVFoundation", "CoreMedia", "Photos", "PhotosUI", "UniformTypeIdentifiers", "ImageIO", "AppKit"),
                          ("AVFoundation", "CoreMedia", "Photos", "PhotosUI", "UniformTypeIdentifiers", "ImageIO", "UIKit")),
-        native_extension("_scene_accel", "native/scene/SceneAccelModule.mm"),
-        native_extension("_physics", "native/physics/PhysicsModule.mm",
+        native_extension("_cocoa._scene_accel", "native/scene/SceneAccelModule.mm"),
+        native_extension("_cocoa._physics", "native/physics/PhysicsModule.mm",
                          extra_sources=sorted(str(path) for path in Path("native/physics/box2d/src").glob("*.c")),
                          include_dirs=("native/physics/box2d/include", "native/physics/box2d/src")),
     ],

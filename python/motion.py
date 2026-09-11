@@ -4,7 +4,7 @@ Native macOS reports unavailable sensors. Acceleration uses m/s², rotation uses
 rad/s, magnetic fields use microteslas, and timestamps are seconds since boot.
 """
 
-from _cocoa_support import Stream, call as _call
+from _cocoa.requests import Stream, call as _call
 
 __all__ = ["available", "Watch", "watch"]
 

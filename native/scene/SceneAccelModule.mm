@@ -4233,7 +4233,7 @@ static PyMethodDef methods[] = {
 
 static struct PyModuleDef module_def = {
     PyModuleDef_HEAD_INIT,
-    "_scene_accel",
+    "_cocoa._scene_accel",
     "C-accelerated scene graph collect and encode.",
     -1,
     methods
@@ -4245,5 +4245,5 @@ PyMODINIT_FUNC PyInit__scene_accel(void) {
 }
 
 void registerSceneAccelModule(void) {
-    PyImport_AppendInittab("_scene_accel", PyInit__scene_accel);
+    PyImport_AppendInittab("_cocoa._scene_accel", PyInit__scene_accel);
 }

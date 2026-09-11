@@ -4,7 +4,7 @@ import json
 import math
 import time
 
-import _cocoakit
+from . import _system
 
 
 def seconds(value, name="timeout", *, maximum=3600, allow_none=False):
@@ -37,7 +37,7 @@ class Request:
         self._handle = None
         self._convert = convert
         self._state = {"done": False, "closed": False}
-        self._handle = _cocoakit.start(operation, json.dumps(options, allow_nan=False))
+        self._handle = _system.start(operation, json.dumps(options, allow_nan=False))
         try:
             self._snapshot(0, consume=False)
         except BaseException:
@@ -48,7 +48,7 @@ class Request:
         handle = self._handle
         if handle is None:
             raise ValueError("This request is closed")
-        self._state = json.loads(_cocoakit.poll(handle, timeout, consume))
+        self._state = json.loads(_system.poll(handle, timeout, consume))
         _check(self._state)
         return self._state
 
@@ -56,7 +56,7 @@ class Request:
     def done(self):
         """Whether the operation finished, including a native failure."""
         if self._handle is not None:
-            self._state = json.loads(_cocoakit.poll(self._handle, 0, False))
+            self._state = json.loads(_system.poll(self._handle, 0, False))
         return self._state["done"]
 
     @property
@@ -80,7 +80,7 @@ class Request:
     def close(self):
         """Cancel pending work and release native resources. Safe to repeat."""
         if self._handle is not None:
-            _cocoakit.close(self._handle)
+            _system.close(self._handle)
             self._handle = None
             self._state["closed"] = True
 

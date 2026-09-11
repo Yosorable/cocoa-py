@@ -6,7 +6,7 @@
  * global master volume, built-in effects (reverb, EQ), and
  * resource management via opaque handles.
  *
- * Registered as built-in module "_audio" via PyImport_AppendInittab.
+ * Loaded as _cocoa._audio, or registered for source-based embedding.
  */
 
 #import <Python.h>
@@ -2468,7 +2468,7 @@ static PyMethodDef audioMethods[] = {
 
 static struct PyModuleDef audioModule = {
     PyModuleDef_HEAD_INIT,
-    "_audio",
+    "_cocoa._audio",
     "cocoa-py audio engine (AVAudioEngine).",
     -1,
     audioMethods,
@@ -2521,5 +2521,5 @@ PyMODINIT_FUNC PyInit__audio(void) {
 }
 
 void registerAudioModule(void) {
-    PyImport_AppendInittab("_audio", PyInit__audio);
+    PyImport_AppendInittab("_cocoa._audio", PyInit__audio);
 }

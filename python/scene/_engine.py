@@ -97,7 +97,7 @@ class SDFGlyphAtlas:
         # No pre-build — atlas is created lazily on first compose() with only needed chars
 
     def _build(self, chars):
-        import _metal
+        from _cocoa import _metal
         existing = {chr(c) for c in self.glyphs}
         all_chars = ''.join(sorted(set(chars) | existing))
         if self.texture:
@@ -212,7 +212,7 @@ class GlyphAtlas:
         self._build(_ATLAS_INITIAL_CHARS)
 
     def _build(self, chars):
-        import _metal
+        from _cocoa import _metal
         existing = {chr(c) for c in self.glyphs}
         all_chars = ''.join(sorted(set(chars) | existing))
         if self.texture:

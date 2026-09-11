@@ -6,7 +6,7 @@ host's notification delegate. Identifiers are namespaced within the host app.
 """
 
 import uuid
-from _cocoa_support import call as _call
+from _cocoa.requests import call as _call
 
 __all__ = ["available", "permission", "request_permission", "schedule", "pending", "cancel", "cancel_all"]
 

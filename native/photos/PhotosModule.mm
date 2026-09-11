@@ -795,7 +795,7 @@ static PyMethodDef PhotosMethods[] = {
 
 static struct PyModuleDef photosmodule = {
     PyModuleDef_HEAD_INIT,
-    "_photos",
+    "_cocoa._photos",
     "Native Photos integration for cocoa-py",
     -1,
     PhotosMethods
@@ -806,5 +806,5 @@ PyMODINIT_FUNC PyInit__photos(void) {
 }
 
 void registerPhotosModule(void) {
-    PyImport_AppendInittab("_photos", PyInit__photos);
+    PyImport_AppendInittab("_cocoa._photos", PyInit__photos);
 }
