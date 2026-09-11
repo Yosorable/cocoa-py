@@ -75,7 +75,7 @@ static PyObject *s__world_transform, *s__world_opacity;
 /* Interactive / bounds */
 static PyObject *s_interactive, *s__bounds, *s__rendered_size;
 /* For fallback path */
-static PyObject *s__emit, *s_kind, *s_cx, *s_cy, *s_hw, *s_hh, *s_rot;
+static PyObject *s__emit, *s__snap, *s_kind, *s_cx, *s_cy, *s_hw, *s_hh, *s_rot;
 static PyObject *s_params, *s_style, *s_extra;
 static PyObject *s__tex, *s__lsize, *s__lcenter, *s__dirty, *s__rscale, *s__shader_size;
 static PyObject *s__path_size, *s__path_center, *s__path_version, *s__ensure_texture, *s__raster_dirty, *s__get_meshes;
@@ -105,7 +105,7 @@ static int intern_strings(void) {
     INTERN(s_text, "text"); INTERN(s_size, "size"); INTERN(s_font, "font");
     INTERN(s_texture, "texture"); INTERN(s_img_size, "img_size");
     INTERN(s__handle, "_handle");
-    INTERN(s__emit, "_emit"); INTERN(s_kind, "kind");
+    INTERN(s__emit, "_emit"); INTERN(s__snap, "_snap"); INTERN(s_kind, "kind");
     INTERN(s_cx, "cx"); INTERN(s_cy, "cy"); INTERN(s_hw, "hw"); INTERN(s_hh, "hh");
     INTERN(s_rot, "rot"); INTERN(s_params, "params"); INTERN(s_style, "style");
     INTERN(s_extra, "extra");
@@ -2081,6 +2081,11 @@ static void handle_unknown_emit(PyObject *node, CNodeCache *cache, CollectState 
     Py_XDECREF(py_op);
     if (PyErr_Occurred()) PyErr_Clear();
 
+    /* Match Node._collect: cache the snapshot after _emit updates local state. */
+    PyObject *snap = PyObject_CallMethodObjArgs(node, s__snap, NULL);
+    Py_XSETREF(cache->snap_cache, snap);
+    if (PyErr_Occurred()) PyErr_Clear();
+
     st->order = (int)PyLong_AsLong(PyList_GET_ITEM(py_order, 0));
     if (PyErr_Occurred()) PyErr_Clear();
 
@@ -2211,10 +2216,9 @@ static void collect_recursive(PyObject *node, const double ptf[6], double pop,
         hit = 0;
     }
 
-    /* For shapes, also need to check shape-specific params + colors.
-       We defer full shape check to avoid reading extra attrs on deep cache hits.
-       But we need a quick color check.  Use color pointer comparison. */
-    if (hit && cache->type_id > NTYPE_GROUP && cache->type_id != NTYPE_LAYER) {
+    /* Validate shape attributes and custom snapshots even when transforms match.
+       NTYPE_UNKNOWN is negative, so it must not be excluded by an ordering check. */
+    if (hit && cache->type_id != NTYPE_GROUP && cache->type_id != NTYPE_LAYER) {
         /* Read shape-specific color objects and compare pointers */
         if (cache->type_id == NTYPE_CIRCLE || cache->type_id == NTYPE_RECT) {
             PyObject *f = PyObject_GetAttr(node, s_fill);
@@ -2400,26 +2404,12 @@ static void collect_recursive(PyObject *node, const double ptf[6], double pop,
             Py_XDECREF(t); Py_XDECREF(tn);
         } else if (cache->type_id == NTYPE_UNKNOWN) {
             /* For unknown types, compare Python _snap() */
-            static PyObject *s__snap = NULL;
-            if (!s__snap) s__snap = PyUnicode_InternFromString("_snap");
             PyObject *snap = PyObject_CallMethodObjArgs(node, s__snap, NULL);
-            if (snap) {
-                if (cache->snap_cache) {
-                    int eq = PyObject_RichCompareBool(snap, cache->snap_cache, Py_EQ);
-                    if (eq != 1) hit = 0;
-                } else {
-                    hit = 0;
-                }
-                if (!hit) {
-                    Py_XDECREF(cache->snap_cache);
-                    cache->snap_cache = snap;  /* steal ref */
-                } else {
-                    Py_DECREF(snap);
-                }
-            } else {
-                PyErr_Clear();
-                hit = 0;
-            }
+            int eq = (snap && cache->snap_cache)
+                ? PyObject_RichCompareBool(snap, cache->snap_cache, Py_EQ) : 0;
+            if (eq != 1) hit = 0;
+            Py_XDECREF(snap);
+            if (PyErr_Occurred()) PyErr_Clear();
         }
     }
 

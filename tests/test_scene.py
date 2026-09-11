@@ -1,9 +1,83 @@
-"""Scene physics and optional native desktop Metal rendering regressions."""
+"""Scene caching, physics and optional native desktop Metal regressions."""
 
 import os
+import struct
 import unittest
 
-from scene import Circle, Label, PhysicsBody, Scene, gpu, run
+from _cocoa import _scene_accel
+from scene import Circle, Group, Label, PhysicsBody, Rect, Scene, gpu, run
+
+
+class SceneCacheTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Group()
+        self.addCleanup(self.root.close)
+
+    def collect(self, previous_fingerprint=0):
+        return _scene_accel.collect(
+            self.root, (1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
+            1.0, 2.0, None, previous_fingerprint)
+
+    def test_stationary_button_subclass_updates_fill_on_every_toggle(self):
+        class Button(Rect):
+            def set_on(self, on):
+                self.fill = "#2ecc71cc" if on else "#333333cc"
+
+        button = Button(80, 32, radius=8, fill="#333333cc")
+        self.root.add(button)
+        frame = self.collect()
+        for on in (True, False, True, False):
+            with self.subTest(on=on):
+                button.set_on(on)
+                updated = self.collect(frame[-1])
+                self.assertIsNotNone(updated[0], "A style change must render a new frame.")
+                self.assertEqual(updated[0], frame[0], "The button must stay in place.")
+                rgba = struct.unpack_from("4f", updated[1], 32)
+                expected = (46, 204, 113, 204) if on else (51, 51, 51, 204)
+                for actual, value in zip(rgba, expected):
+                    self.assertAlmostEqual(actual, value / 255, places=6)
+                self.assertEqual(self.collect(updated[-1]), (None, updated[-1]))
+                frame = updated
+
+    def test_stationary_shape_subclass_updates_geometry(self):
+        class Dot(Circle):
+            pass
+
+        dot = Dot(10, fill="#f1c40f")
+        self.root.add(dot)
+        first = self.collect()
+        dot.radius = 20
+        enlarged = self.collect(first[-1])
+        self.assertIsNotNone(enlarged[0])
+        self.assertNotEqual(enlarged[0], first[0])
+        self.assertNotEqual(enlarged[1], first[1])
+        self.assertEqual(self.collect(enlarged[-1]), (None, enlarged[-1]))
+
+    def test_custom_snapshot_and_emitter_preserve_static_frame_skipping(self):
+        class Indicator(Rect):
+            active = False
+            emissions = 0
+
+            def _snap(self):
+                return super()._snap() + (self.active,)
+
+            def _emit(self, cmds, renderer, world, opacity, order):
+                self.emissions += 1
+                self.fill = "#2ecc71" if self.active else "#333333"
+                super()._emit(cmds, renderer, world, opacity, order)
+
+        indicator = Indicator(80, 32)
+        self.root.add(indicator)
+        initial = self.collect()
+        self.assertEqual(self.collect(initial[-1]), (None, initial[-1]))
+        self.assertEqual(indicator.emissions, 1)
+        indicator.active = True
+        changed = self.collect(initial[-1])
+        self.assertIsNotNone(changed[0])
+        self.assertNotEqual(changed[1], initial[1])
+        self.assertEqual(indicator.emissions, 2)
+        self.assertEqual(self.collect(changed[-1]), (None, changed[-1]))
+        self.assertEqual(indicator.emissions, 2)
 
 
 class PhysicsTests(unittest.TestCase):

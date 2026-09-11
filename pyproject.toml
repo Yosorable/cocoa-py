@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cocoa-py"
-version = "0.1.0a2"
+version = "0.1.0a3"
 dynamic = ["scripts"]
 description = "Native Apple platform modules for Python"
 readme = "README.md"
