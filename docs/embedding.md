@@ -112,6 +112,14 @@ Importing these modules does not bypass the host's authorization, entitlements
 or package policy. The host still owns its privacy policy, App Store privacy
 answers, required-reason API declarations, and application lifecycle.
 
+Copy `native/common/CocoaPyPrivacy.bundle` into the app's resources. It declares
+the library's file metadata access, local timing calculations, and disk capacity
+display/write checks. The host must separately declare its own API usage.
+Use device uptime for local timing and storage information for visible capacity
+display or write-space decisions; do not transmit these raw device signals for
+profiling. Review Apple's current [required-reason API documentation](https://developer.apple.com/documentation/bundleresources/describing-use-of-required-reason-api)
+against the host's actual behavior before distributing an application.
+
 ## Validate the integration
 
 Compile an iPhoneOS device target, verify all registered imports and metadata,

@@ -27,6 +27,7 @@
 @end
 
 @implementation CocoaPyRequest
+@synthesize done = _done, closed = _closed;
 - (instancetype)init {
     if ((self = [super init])) {
         _samples = [NSMutableArray array]; _capacity = 128;
@@ -34,6 +35,10 @@
     }
     return self;
 }
+- (BOOL)done { @synchronized(self) { return _done; } }
+- (void)setDone:(BOOL)value { @synchronized(self) { _done = value; } }
+- (BOOL)closed { @synchronized(self) { return _closed; } }
+- (void)setClosed:(BOOL)value { @synchronized(self) { _closed = value; } }
 - (void)finish:(id)value {
     @synchronized(self) {
         if (_done || _closed) return;

@@ -40,8 +40,13 @@ static CocoaPyRequest *CocoaPyMotion(NSString *name, NSDictionary *args) {
     __weak CocoaPyMotionRequest *weakRequest = request;
     void (^deliver)(NSDictionary *, NSError *) = ^(NSDictionary *sample, NSError *error) {
         CocoaPyMotionRequest *target = weakRequest;
-        if (error) [target fail:error.code == CMErrorMotionActivityNotAuthorized ? @"permission" : @"os" message:error.localizedDescription];
-        else if (sample) [target push:sample];
+        if (error) {
+            BOOL denied = [error.domain isEqual:CMErrorDomain] &&
+                (error.code == CMErrorMotionActivityNotAuthorized || error.code == CMErrorNotAuthorized ||
+                 error.code == CMErrorMotionActivityNotEntitled || error.code == CMErrorNotEntitled);
+            [target fail:denied ? @"permission" : @"os" message:error.localizedDescription];
+            dispatch_async(dispatch_get_main_queue(), ^{ [target close]; });
+        } else if (sample) [target push:sample];
     };
     if ([sensor isEqual:@"accelerometer"]) {
         [manager startAccelerometerUpdatesToQueue:request.queue withHandler:^(CMAccelerometerData *data, NSError *error) {

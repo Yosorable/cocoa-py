@@ -6,11 +6,11 @@ available through Python `help()`. Platform and lifetime details are in
 
 ## Audio
 
-`audio` exposes `Sound`, `Channel`, `Recorder`, `InputStream`, `OutputStream` and
+`audio` exposes `Sound`, `Stream`, `Channel`, `Recorder`, `InputStream`, `OutputStream` and
 `Track`, plus `play`, `mix`, `export`, global controls and device/event queries.
 
-- `Sound(path, stream=False)` decodes a file; `stream=True` reads long files in
-  bounded chunks. `Sound.from_bytes(data)` accepts encoded audio and
+- `Sound(path)` decodes a file; `Stream(path)` reads long files in
+  bounded chunks. `Sound(encoded_bytes)` accepts in-memory audio and
   `Sound.from_pcm(...)` accepts PCM. Wait for `loaded` before accessing decoded
   PCM. `duration`, `sample_rate`, `channels` and `frames` describe the source.
 - `sound.play(...)` returns a `Channel`. It supports pause/resume/stop, seeking,
