@@ -60,7 +60,9 @@ with audio.Sound("sound.wav") as sound:
     channel.wait()
 ```
 
-For permission-sensitive desktop scripts, use the supplied launcher:
+Use `python my_script.py` for normal execution. The optional macOS launcher is
+available when your Python host lacks an app identity or the usage descriptions
+needed for microphone, location or photo library access:
 
 ```sh
 cocoa-py my_script.py

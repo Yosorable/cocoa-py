@@ -18,6 +18,10 @@ shader resources live under `python/`, native implementations under `native/`.
 `tools/install_embedded.py` supports optional source-based host integration.
 The macOS runner is a separate executable and must not enter an iOS source target.
 
+The macOS launcher is optional; document `python script.py` as the default.
+Preserve it for hosts that lack an app identity or required permission usage
+descriptions. A `Python.app` identity alone does not guarantee those declarations.
+
 ## Native boundaries
 
 - Validate Python inputs before passing them to Apple frameworks, and translate
