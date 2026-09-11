@@ -18,20 +18,44 @@ def install(destination: Path):
     project = tomllib.loads((root / "pyproject.toml").read_text())["project"]
     source = root / "python"
     destination.mkdir(parents=True, exist_ok=True)
+    resolved_destination = destination.resolve()
+
+    def contained(path):
+        if not path.resolve().is_relative_to(resolved_destination):
+            raise ValueError(f"An embedded destination path escapes site-packages: {path}")
+        return path
+
+    owned_roots = {path.name for path in source.glob("*.py")}
+    owned_roots.update(path.name for path in source.iterdir() if path.is_dir() and (path / "__init__.py").is_file())
+    # Reconcile only files owned by an earlier embedded installation. Never
+    # follow a RECORD entry outside site-packages or delete another package.
+    for previous in destination.glob("cocoa_py-*.dist-info"):
+        record = contained(previous / "RECORD")
+        if record.is_file():
+            with record.open(newline="") as stored:
+                for row in csv.reader(stored):
+                    if not row:
+                        continue
+                    relative = Path(row[0])
+                    if relative.is_absolute() or ".." in relative.parts or not relative.parts or relative.parts[0] not in owned_roots:
+                        continue
+                    target = contained(destination / relative)
+                    if target.is_file() and not target.is_symlink():
+                        target.unlink()
+        shutil.rmtree(previous)
     files = []
     for path in sorted(source.rglob("*")):
         relative = path.relative_to(source)
-        if not path.is_file() or "__pycache__" in relative.parts or path.suffix == ".pyc":
+        if not path.is_file() or path.suffix not in (".py", ".metal", ".metallib"):
+            continue
+        if any(part == "__pycache__" or part.startswith(".") or part.endswith((".egg-info", ".dist-info")) for part in relative.parts):
             continue
         if relative == Path("cocoa_run.py") or relative.name == "_runner":
             continue
-        target = destination / relative
+        target = contained(destination / relative)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, target)
         files.append(target)
-    # Remove metadata left by a previous build of this same distribution.
-    for previous in destination.glob("cocoa_py-*.dist-info"):
-        shutil.rmtree(previous)
     metadata = destination / f"cocoa_py-{project['version']}.dist-info"
     licenses = metadata / "licenses"
     licenses.mkdir(parents=True)
