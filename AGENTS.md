@@ -12,13 +12,10 @@ must not be documented as already available.
 
 ## Source layout
 
-- `native/coreml/`: the Objective-C++ Core ML extension and its registration header.
-- `setup.py`: native compiler, linker, architecture, and deployment target settings.
-- `pyproject.toml`: distribution metadata and build and runtime dependencies.
-- `MANIFEST.in`: additional files included in the source distribution.
-- `tests/test_coreml.py`: public API tests using real model compilation and inference.
-- `tests/CoreMLFixtures/CoreMLFixtures.zip`: small generated models used by the tests.
-- `docs/releases/`: published artifact details and validation records.
+See `docs/architecture.md` for the canonical source map. Python wrappers and
+shader resources live under `python/`, native implementations under `native/`.
+`tools/install_embedded.py` copies wrappers and metadata for an embedded host.
+The macOS runner is a separate executable and must not enter an iOS source target.
 
 ## Native boundaries
 
@@ -47,8 +44,9 @@ python3.14 -m pip install --force-reinstall '.[coreml]'
 python3.14 -m unittest discover -s tests -v
 ```
 
-Tests use the bundled models and exercise actual Core ML compilation and
-inference. For packaging changes, also inspect the source archive and wheel
+Tests exercise real Core ML inference, offline audio, Box2D and native system
+requests. Set `COCOA_PY_UI_TESTS=1` for desktop Metal and sharing windows; set
+`COCOA_PY_NETWORK_TESTS=1` for a public-address geocoder request. For packaging changes, also inspect the source archive and wheel
 contents, and verify that the wheel platform tag matches the native deployment
 target. Record which systems were actually tested separately from the declared
 minimum deployment target. Documentation-only edits need relevant content and

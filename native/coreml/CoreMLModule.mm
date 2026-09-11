@@ -1,4 +1,4 @@
-// CoreMLModule.mm — Python C extension for CoreML inference on iOS
+// CoreMLModule.mm — Python C extension for Core ML inference on Apple platforms
 //
 // Built-in module registered via PyImport_AppendInittab before Py_Initialize().
 // Provides model compilation, inspection, and single/batch inference.
@@ -14,6 +14,8 @@
 #import <Foundation/Foundation.h>
 
 #include "CoreMLModule.h"
+#include "../common/CocoaPlatform.h"
+#include <memory>
 
 // ============================================================================
 // MARK: - CoreMLModel Python type
@@ -22,11 +24,13 @@
 typedef struct {
     PyObject_HEAD
     MLModel * __strong model;
+    CocoaPyFileAccess *fileAccess;
 } CoreMLModelObject;
 
 static void CoreMLModel_dealloc(PyObject *self) {
     CoreMLModelObject *obj = (CoreMLModelObject *)self;
     obj->model = nil;  // ARC releases
+    delete obj->fileAccess;
     Py_TYPE(self)->tp_free(self);
 }
 
@@ -441,6 +445,7 @@ static PyObject *coreml_load(PyObject *self, PyObject *args, PyObject *kwargs) {
     NSString *nsPath = python_path(path);
     if (!nsPath) return NULL;
     NSURL *url = [NSURL fileURLWithPath:nsPath];
+    auto fileAccess = std::make_unique<CocoaPyFileAccess>(url);
 
     // Check path exists
     if (![[NSFileManager defaultManager] fileExistsAtPath:nsPath]) {
@@ -484,6 +489,7 @@ static PyObject *coreml_load(PyObject *self, PyObject *args, PyObject *kwargs) {
     CoreMLModelObject *obj = (CoreMLModelObject *)CoreMLModelType->tp_alloc(CoreMLModelType, 0);
     if (!obj) return NULL;
     obj->model = model;  // ARC retains (tp_alloc zero-inited, so old value is nil)
+    obj->fileAccess = fileAccess.release();
     return (PyObject *)obj;
 }
 
@@ -622,6 +628,8 @@ static PyObject *coreml_compile(PyObject *self, PyObject *args, PyObject *kwargs
     if (!nsSrcPath) return NULL;
     NSString *nsDstDir = dstDir == Py_None ? nil : python_path(dstDir);
     if (dstDir != Py_None && !nsDstDir) return NULL;
+    CocoaPyFileAccess sourceAccess([NSURL fileURLWithPath:nsSrcPath]);
+    CocoaPyFileAccess destinationAccess([NSURL fileURLWithPath:nsDstDir ?: [nsSrcPath stringByDeletingLastPathComponent]]);
     if (![[NSFileManager defaultManager] fileExistsAtPath:nsSrcPath]) {
         PyErr_Format(PyExc_FileNotFoundError, "Model not found: %s", nsSrcPath.UTF8String);
         return NULL;
@@ -918,7 +926,7 @@ static PyMethodDef CoreMLMethods[] = {
 static struct PyModuleDef coremlmodule = {
     PyModuleDef_HEAD_INIT,
     "coreml",
-    "CoreML hardware-accelerated inference on iOS (Neural Engine / GPU / CPU)",
+    "Core ML hardware-accelerated inference on Apple platforms (Neural Engine / GPU / CPU)",
     -1,
     CoreMLMethods
 };

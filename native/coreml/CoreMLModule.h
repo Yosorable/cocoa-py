@@ -5,7 +5,7 @@
 extern "C" {
 #endif
 
-/// Register the _coreml built-in Python module.
+/// Register the coreml built-in Python module.
 /// Must be called BEFORE Py_Initialize().
 void registerCoreMLModule(void);
 
