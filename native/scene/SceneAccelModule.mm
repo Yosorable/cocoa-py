@@ -80,6 +80,7 @@ static PyObject *s_params, *s_style, *s_extra;
 static PyObject *s__tex, *s__lsize, *s__lcenter, *s__dirty, *s__rscale, *s__shader_size;
 static PyObject *s__capture_center;
 static PyObject *s__path_size, *s__path_center, *s__path_version, *s__ensure_texture, *s__raster_dirty, *s__get_meshes;
+static PyObject *s__cached_mesh_scale;
 static PyObject *s__rebuild, *s_text_texture;
 static PyObject *s_parent;
 /* NineSlice */
@@ -113,6 +114,7 @@ static int intern_strings(void) {
     INTERN(s__tex, "_tex"); INTERN(s__shader_size, "_shader_size");
     INTERN(s__path_size, "_path_size"); INTERN(s__path_center, "_path_center");
     INTERN(s__path_version, "_path_version"); INTERN(s__ensure_texture, "_ensure_texture"); INTERN(s__get_meshes, "_get_meshes");
+    INTERN(s__cached_mesh_scale, "_cached_mesh_scale");
     INTERN(s__raster_dirty, "_raster_dirty");
     INTERN(s__lsize, "_lsize"); INTERN(s__lcenter, "_lcenter");
     INTERN(s__capture_center, "_capture_center");
@@ -193,6 +195,7 @@ typedef struct {
     /* Path local-space mesh cache */
     PyObject *cached_mesh_list;  /* strong ref to _get_meshes() result */
     double cached_path_version;  /* _path_version when meshes were cached */
+    double cached_mesh_scale;   /* pixel scale covered by this mesh list */
 } CNodeCache;
 
 typedef struct {
@@ -295,6 +298,18 @@ static inline void c_apply(const double m[6], double px, double py, double *ox, 
 
 static inline double c_avg_scale(const double m[6]) {
     return 0.5 * (hypot(m[0], m[1]) + hypot(m[2], m[3]));
+}
+
+static double c_max_scale(const double m[6]) {
+    double peak = std::max({fabs(m[0]), fabs(m[1]), fabs(m[2]), fabs(m[3])});
+    if (peak == 0.0 || !isfinite(peak)) return peak;
+    double a = m[0] / peak, b = m[1] / peak, c = m[2] / peak, d = m[3] / peak;
+    return peak * (0.5 * hypot(a + d, b - c) + 0.5 * hypot(a - d, b + c));
+}
+
+static bool path_scale_usable(double cached, double required) {
+    /* Match _usable_scale in _path_node.py, including shrink hysteresis. */
+    return isfinite(required) && required <= cached * (1.0 + 1e-12) && required >= cached * 0.25;
 }
 
 static inline double c_rot(const double m[6]) {
@@ -426,19 +441,23 @@ static inline double path_cross(const PathPoint &a, const PathPoint &b, const Pa
     return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
 }
 
-static double path_distance_to_line(const PathPoint &p, const PathPoint &a, const PathPoint &b) {
+static double path_distance_to_chord(const PathPoint &p, const PathPoint &a, const PathPoint &b) {
     double dx = b.x - a.x, dy = b.y - a.y;
     double ln = hypot(dx, dy);
     if (ln < 1e-12) return hypot(p.x - a.x, p.y - a.y);
-    return fabs((p.x - a.x) * dy - (p.y - a.y) * dx) / ln;
+    double ux = dx / ln, uy = dy / ln;
+    double projection = (p.x - a.x) * ux + (p.y - a.y) * uy;
+    if (projection <= 0.0) return hypot(p.x - a.x, p.y - a.y);
+    if (projection >= ln) return hypot(p.x - b.x, p.y - b.y);
+    return fabs((p.x - a.x) * uy - (p.y - a.y) * ux);
 }
 
 static inline bool quad_flat_enough(const PathPoint &p0, const PathPoint &p1, const PathPoint &p2, double tol) {
-    return path_distance_to_line(p1, p0, p2) <= tol;
+    return path_distance_to_chord(p1, p0, p2) <= tol;
 }
 
 static inline bool cubic_flat_enough(const PathPoint &p0, const PathPoint &p1, const PathPoint &p2, const PathPoint &p3, double tol) {
-    return std::max(path_distance_to_line(p1, p0, p3), path_distance_to_line(p2, p0, p3)) <= tol;
+    return std::max(path_distance_to_chord(p1, p0, p3), path_distance_to_chord(p2, p0, p3)) <= tol;
 }
 
 static void flatten_quad(const PathPoint &p0, const PathPoint &p1, const PathPoint &p2, double tol, int depth, std::vector<PathPoint> &out) {
@@ -531,15 +550,26 @@ static PathPoint line_intersection(const PathPoint &a0, const PathPoint &a1, con
     return {a0.x + t * dax, a0.y + t * day};
 }
 
+static int path_arc_steps(double span, double radius, int minimum, double tolerance) {
+    double angle = M_PI / 10.0;
+    if (tolerance > 0.0 && radius > 0.0) {
+        /* Sagitta bound, evaluated without subtracting nearly equal numbers. */
+        angle = std::min(angle, 4.0 * asin(sqrt(std::min(1.0, tolerance / radius) * 0.5)));
+    }
+    if (angle <= fabs(span) / 4096.0) return 4096;
+    return std::max(minimum, (int)ceil(fabs(span) / angle));
+}
+
 static void append_round_join(std::vector<std::array<PathPoint, 3>> &tris, const PathPoint &center,
-                              const PathPoint &start_outer, const PathPoint &end_outer, double radius, bool clockwise) {
+                              const PathPoint &start_outer, const PathPoint &end_outer, double radius, bool clockwise,
+                              double tolerance) {
     double a0 = atan2(start_outer.y - center.y, start_outer.x - center.x);
     double a1 = atan2(end_outer.y - center.y, end_outer.x - center.x);
     if (clockwise) while (a1 > a0) a1 -= M_PI * 2.0;
     else while (a1 < a0) a1 += M_PI * 2.0;
     double span = a1 - a0;
     if (fabs(span) < 1e-6) return;
-    int steps = std::max(3, (int)ceil(fabs(span) / (M_PI / 10.0)));
+    int steps = path_arc_steps(span, radius, 3, tolerance);
     PathPoint prev = start_outer;
     for (int i = 1; i <= steps; i++) {
         PathPoint cur;
@@ -555,7 +585,7 @@ static void append_round_join(std::vector<std::array<PathPoint, 3>> &tris, const
 }
 
 static void append_cap(std::vector<std::array<PathPoint, 3>> &tris, const PathPoint &point, const PathPoint &direction, double hw,
-                       const PathPoint &left, const PathPoint &right, const char *cap, bool start) {
+                       const PathPoint &left, const PathPoint &right, const char *cap, bool start, double tolerance) {
     if (strcmp(cap, "butt") == 0) return;
     if (strcmp(cap, "square") == 0) {
         double sign = start ? -1.0 : 1.0;
@@ -570,7 +600,7 @@ static void append_cap(std::vector<std::array<PathPoint, 3>> &tris, const PathPo
     if (start) while (a1 > a0) a1 -= M_PI * 2.0;
     else while (a1 < a0) a1 += M_PI * 2.0;
     double span = a1 - a0;
-    int steps = std::max(6, (int)ceil(fabs(span) / (M_PI / 10.0)));
+    int steps = path_arc_steps(span, hw, 6, tolerance);
     PathPoint prev = right;
     for (int i = 1; i <= steps; i++) {
         PathPoint cur;
@@ -598,7 +628,8 @@ static const char *normalize_cap_c(const char *cap) {
 }
 
 static std::vector<std::array<PathPoint, 3>> stroke_polyline_c(const std::vector<PathPoint> &src_points, bool closed, double width,
-                                                               const char *join, const char *cap, double miter_limit) {
+                                                               const char *join, const char *cap, double miter_limit,
+                                                               double tolerance = 0.0) {
     std::vector<std::array<PathPoint, 3>> triangles;
     if (src_points.size() < 2 || width <= 0.0) return triangles;
     join = normalize_join_c(join);
@@ -658,7 +689,7 @@ static std::vector<std::array<PathPoint, 3>> stroke_polyline_c(const std::vector
                 if (ok && hypot(inter.x - point.x, inter.y - point.y) <= hw * std::max(1.0, miter_limit))
                     append_triangle(triangles, outer_prev, inter, outer_next);
             } else if (strcmp(join, "round") == 0) {
-                append_round_join(triangles, point, outer_prev, outer_next, hw, false);
+                append_round_join(triangles, point, outer_prev, outer_next, hw, false, tolerance);
             } else {
                 append_triangle(triangles, point, outer_prev, outer_next);
             }
@@ -674,7 +705,7 @@ static std::vector<std::array<PathPoint, 3>> stroke_polyline_c(const std::vector
                 if (ok && hypot(inter.x - point.x, inter.y - point.y) <= hw * std::max(1.0, miter_limit))
                     append_triangle(triangles, outer_prev, outer_next, inter);
             } else if (strcmp(join, "round") == 0) {
-                append_round_join(triangles, point, outer_prev, outer_next, hw, true);
+                append_round_join(triangles, point, outer_prev, outer_next, hw, true, tolerance);
             } else {
                 append_triangle(triangles, point, outer_next, outer_prev);
             }
@@ -687,8 +718,8 @@ static std::vector<std::array<PathPoint, 3>> stroke_polyline_c(const std::vector
         PathPoint right0{points.front().x - first_norm.x * hw, points.front().y - first_norm.y * hw};
         PathPoint left1{points.back().x + last_norm.x * hw, points.back().y + last_norm.y * hw};
         PathPoint right1{points.back().x - last_norm.x * hw, points.back().y - last_norm.y * hw};
-        append_cap(triangles, points.front(), dirs.front(), hw, left0, right0, cap, true);
-        append_cap(triangles, points.back(), dirs.back(), hw, left1, right1, cap, false);
+        append_cap(triangles, points.front(), dirs.front(), hw, left0, right0, cap, true, tolerance);
+        append_cap(triangles, points.back(), dirs.back(), hw, left1, right1, cap, false, tolerance);
     }
 
     return triangles;
@@ -1889,20 +1920,24 @@ static void emit_shadernode(PyObject *node, CNodeCache *cache, CollectState *st,
 
 static void emit_path(PyObject *node, CNodeCache *cache, CollectState *st,
                       const double world[6], double op) {
-    /* Check if we can reuse cached mesh list (path_version unchanged) */
+    /* Geometry depends on projected size as well as the logical path version. */
     double version = read_double(node, s__path_version);
+    double required = c_max_scale(world) * st->screen_scale;
+    if (required < 1.0) required = 1.0;
     PyObject *mesh_list = NULL;
-    if (cache->cached_mesh_list != NULL && cache->cached_path_version == version) {
+    if (cache->cached_mesh_list != NULL && cache->cached_path_version == version &&
+            path_scale_usable(cache->cached_mesh_scale, required)) {
         mesh_list = cache->cached_mesh_list;
         Py_INCREF(mesh_list);
     } else {
         /* Call Python _get_meshes() to build/cache mesh data */
         mesh_list = PyObject_CallMethodObjArgs(node, s__get_meshes, st->renderer, NULL);
-        if (mesh_list && mesh_list != Py_None && PyList_Check(mesh_list) && PyList_GET_SIZE(mesh_list) > 0) {
+        if (mesh_list && PyList_Check(mesh_list)) {
             Py_XDECREF(cache->cached_mesh_list);
             cache->cached_mesh_list = mesh_list;
             Py_INCREF(mesh_list);
             cache->cached_path_version = version;
+            cache->cached_mesh_scale = read_double(node, s__cached_mesh_scale);
         }
     }
     if (!mesh_list || mesh_list == Py_None || !PyList_Check(mesh_list) || PyList_GET_SIZE(mesh_list) == 0) {
@@ -4037,7 +4072,11 @@ static PyObject *py_path_flatten(PyObject *self, PyObject *args) {
     int max_depth;
     if (!PyArg_ParseTuple(args, "Odi", &commands, &tolerance, &max_depth)) return NULL;
     std::vector<PathSubpath> subpaths;
-    if (!parse_path_commands(commands, tolerance < 0.05 ? 0.05 : tolerance, max_depth < 1 ? 1 : max_depth, subpaths)) return NULL;
+    if (!isfinite(tolerance) || tolerance <= 0.0) {
+        PyErr_SetString(PyExc_ValueError, "Path tolerance must be finite and positive");
+        return NULL;
+    }
+    if (!parse_path_commands(commands, tolerance, max_depth < 1 ? 1 : max_depth, subpaths)) return NULL;
     return build_subpaths_py(subpaths);
 }
 
@@ -4128,11 +4167,15 @@ static PyObject *py_path_stroke_contains(PyObject *self, PyObject *args) {
 static PyObject *py_build_path_meshes(PyObject *self, PyObject *args) {
     PyObject *subpaths_obj, *fill_color_obj, *stroke_color_obj;
     double stroke_width, miter_limit;
-    double offset_x = 0.0, offset_y = 0.0;
+    double offset_x = 0.0, offset_y = 0.0, tolerance = 0.0;
     const char *join, *cap, *fill_rule;
-    if (!PyArg_ParseTuple(args, "OOOdssds|dd", &subpaths_obj, &fill_color_obj, &stroke_color_obj,
+    if (!PyArg_ParseTuple(args, "OOOdssds|ddd", &subpaths_obj, &fill_color_obj, &stroke_color_obj,
                           &stroke_width, &join, &cap, &miter_limit, &fill_rule,
-                          &offset_x, &offset_y)) return NULL;
+                          &offset_x, &offset_y, &tolerance)) return NULL;
+    if (!isfinite(tolerance) || tolerance < 0.0) {
+        PyErr_SetString(PyExc_ValueError, "Stroke tolerance must be finite and non-negative");
+        return NULL;
+    }
     float ox = (float)offset_x, oy = (float)offset_y;
     std::vector<PathSubpath> subpaths;
     if (!parse_path_subpaths(subpaths_obj, subpaths)) return NULL;
@@ -4173,7 +4216,7 @@ static PyObject *py_build_path_meshes(PyObject *self, PyObject *args) {
         std::vector<std::array<PathPoint, 3>> tris;
         for (const auto &item : stroke_paths) {
             if (item.first.size() < 2) continue;
-            auto part = stroke_polyline_c(item.first, item.second, stroke_width, join, cap, miter_limit);
+            auto part = stroke_polyline_c(item.first, item.second, stroke_width, join, cap, miter_limit, tolerance);
             tris.insert(tris.end(), part.begin(), part.end());
         }
         if (!tris.empty()) {

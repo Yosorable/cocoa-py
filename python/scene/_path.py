@@ -48,8 +48,15 @@ def commands_snapshot(commands):
     return tuple(snap)
 
 
+def _positive_tolerance(value):
+    value = float(value)
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("Path tolerance must be finite and positive")
+    return value
+
+
 def flatten_commands(commands, *, tolerance=0.75, max_depth=10):
-    tol = max(0.05, float(tolerance))
+    tol = _positive_tolerance(tolerance)
     depth = max(1, int(max_depth))
     subpaths = []
     current = []
@@ -118,7 +125,7 @@ def flatten_commands(commands, *, tolerance=0.75, max_depth=10):
     return subpaths
 
 
-def _build_path_meshes_py(subpaths, *, fill_color, stroke_color, stroke_style, fill_rule="even_odd", offset=(0, 0)):
+def _build_path_meshes_py(subpaths, *, fill_color, stroke_color, stroke_style, fill_rule="even_odd", offset=(0, 0), tolerance=None):
     fill_meshes = []
     stroke_meshes = []
 
@@ -159,21 +166,11 @@ def _build_path_meshes_py(subpaths, *, fill_color, stroke_color, stroke_style, f
                     join=stroke_style.join,
                     cap=stroke_style.cap,
                     miter_limit=stroke_style.miter_limit,
+                    tolerance=tolerance,
                 ))
         if stroke_tris:
             stroke_meshes.append(_triangles_to_mesh(stroke_tris, stroke_color, is_stroke=True, offset=offset))
-            # Generate fringe around the stroke outline
-            # Build outline from stroke triangles (simplified: use convex hull of stroke)
-            outline_pts = []
-            for tri in stroke_tris:
-                for p in tri:
-                    outline_pts.append(p)
-            if outline_pts:
-                hull = _convex_hull(outline_pts)
-                if hull and len(hull) >= 3:
-                    fringe = _build_fringe_mesh(hull, stroke_color, fringe_width=0.5, closed=True, offset=offset)
-                    if fringe:
-                        stroke_meshes.append(fringe)
+            # Both backends use renderer MSAA on the actual stroke boundary.
 
     return fill_meshes, stroke_meshes
 
@@ -225,6 +222,65 @@ def path_bounds(subpaths, *, stroke_width=0.0, join="round", cap="round", miter_
     return (x0, y0, x1, y1)
 
 
+def _bezier_axis_extrema(values):
+    """Evaluate interior extrema without depending on a flattening tolerance."""
+    peak = max(abs(value) for value in values)
+    if peak == 0:
+        return []
+    normalized = [value / peak for value in values]
+    if len(values) == 3:
+        p0, p1, p2 = normalized
+        denominator = (p0 - p1) + (p2 - p1)
+        roots = [] if denominator == 0 else [(p0 - p1) / denominator]
+    else:
+        p0, p1, p2, p3 = normalized
+        d0, d1, d2 = p1 - p0, p2 - p1, p3 - p2
+        a, b, c = d0 - 2 * d1 + d2, 2 * (d1 - d0), d0
+        if a == 0:
+            roots = [] if b == 0 else [-c / b]
+        else:
+            discriminant = b * b - 4 * a * c
+            if discriminant < 0:
+                roots = []
+            else:
+                q = -0.5 * (b + math.copysign(math.sqrt(discriminant), b))
+                roots = [-b / (2 * a)] if q == 0 else [q / a, c / q]
+    extrema = []
+    for t in roots:
+        if 0 < t < 1:
+            work = values
+            while len(work) > 1:
+                work = [(1 - t) * x + t * y for x, y in zip(work, work[1:])]
+            extrema.append(work[0])
+    return extrema
+
+
+def command_bounds(commands):
+    """Centerline bounds of validated commands, independent of render quality."""
+    xs, ys = [], []
+    cursor = start = None
+    for kind, values in commands:
+        if kind == "M":
+            cursor = start = values
+        elif kind in ("L", "Q", "C"):
+            controls = [cursor, *zip(values[::2], values[1::2])]
+            # A move followed only by zero-length segments has no drawable bounds.
+            if any(point != cursor for point in controls[1:]):
+                x, y = list(zip(*controls))
+                xs.extend((x[0], x[-1]))
+                ys.extend((y[0], y[-1]))
+                if kind != "L":
+                    xs.extend(_bezier_axis_extrema(x))
+                    ys.extend(_bezier_axis_extrema(y))
+            cursor = controls[-1]
+        elif kind == "Z":
+            if cursor is not None and start is not None and cursor != start:
+                xs.extend((cursor[0], start[0]))
+                ys.extend((cursor[1], start[1]))
+            cursor = start = None
+    return None if not xs else (min(xs), min(ys), max(xs), max(ys))
+
+
 def fill_contains_point(subpaths, x, y, *, fill_rule="even_odd"):
     winding = 0
     inside = False
@@ -274,7 +330,9 @@ def contour_fill_layers(contours, fill_color, *, fill_rule: FillRule | str = Fil
     ]
 
 
-def stroke_polyline(points, *, closed, width, join="round", cap="round", miter_limit=4.0):
+def stroke_polyline(points, *, closed, width, join="round", cap="round", miter_limit=4.0, tolerance=None):
+    if tolerance is not None:
+        tolerance = _positive_tolerance(tolerance)
     if len(points) < 2 or width <= 0:
         return []
     join = _normalize_join(join)
@@ -339,7 +397,7 @@ def stroke_polyline(points, *, closed, width, join="round", cap="round", miter_l
                 if inter is not None and math.hypot(inter[0] - point[0], inter[1] - point[1]) <= hw * max(1.0, miter_limit):
                     triangles.append((outer_prev, inter, outer_next))
             elif join == "round":
-                _append_round_join(triangles, point, outer_prev, outer_next, hw, clockwise=False)
+                _append_round_join(triangles, point, outer_prev, outer_next, hw, clockwise=False, tolerance=tolerance)
             else:
                 triangles.append((point, outer_prev, outer_next))
         else:
@@ -354,7 +412,7 @@ def stroke_polyline(points, *, closed, width, join="round", cap="round", miter_l
                 if inter is not None and math.hypot(inter[0] - point[0], inter[1] - point[1]) <= hw * max(1.0, miter_limit):
                     triangles.append((outer_prev, outer_next, inter))
             elif join == "round":
-                _append_round_join(triangles, point, outer_prev, outer_next, hw, clockwise=True)
+                _append_round_join(triangles, point, outer_prev, outer_next, hw, clockwise=True, tolerance=tolerance)
             else:
                 triangles.append((point, outer_next, outer_prev))
 
@@ -365,8 +423,8 @@ def stroke_polyline(points, *, closed, width, join="round", cap="round", miter_l
         right0 = (points[0][0] - first_norm[0] * hw, points[0][1] - first_norm[1] * hw)
         left1 = (points[-1][0] + last_norm[0] * hw, points[-1][1] + last_norm[1] * hw)
         right1 = (points[-1][0] - last_norm[0] * hw, points[-1][1] - last_norm[1] * hw)
-        _append_cap(triangles, points[0], dirs[0], hw, left0, right0, cap, start=True)
-        _append_cap(triangles, points[-1], dirs[-1], hw, left1, right1, cap, start=False)
+        _append_cap(triangles, points[0], dirs[0], hw, left0, right0, cap, start=True, tolerance=tolerance)
+        _append_cap(triangles, points[-1], dirs[-1], hw, left1, right1, cap, start=False, tolerance=tolerance)
 
     return triangles
 
@@ -594,7 +652,18 @@ def _ear_clip(points):
     return triangles
 
 
-def _append_round_join(triangles, center, start_outer, end_outer, radius, *, clockwise):
+def _arc_steps(span, radius, minimum, tolerance):
+    angle = math.pi / 10
+    if tolerance is not None and radius > 0:
+        # Sagitta = radius * (1 - cos(angle / 2)); asin stays accurate for
+        # tolerances much smaller than the radius. Bound work at extreme zoom.
+        angle = min(angle, 4 * math.asin(math.sqrt(min(1.0, tolerance / radius) * 0.5)))
+    if angle <= abs(span) / 4096:
+        return 4096
+    return max(minimum, math.ceil(abs(span) / angle))
+
+
+def _append_round_join(triangles, center, start_outer, end_outer, radius, *, clockwise, tolerance=None):
     a0 = math.atan2(start_outer[1] - center[1], start_outer[0] - center[0])
     a1 = math.atan2(end_outer[1] - center[1], end_outer[0] - center[0])
     if clockwise:
@@ -606,16 +675,16 @@ def _append_round_join(triangles, center, start_outer, end_outer, radius, *, clo
     span = a1 - a0
     if abs(span) < 1e-6:
         return
-    steps = max(3, int(math.ceil(abs(span) / (math.pi / 10))))
+    steps = _arc_steps(span, radius, 3, tolerance)
     prev = start_outer
     for i in range(1, steps + 1):
         ang = a0 + span * (i / steps)
-        cur = (center[0] + math.cos(ang) * radius, center[1] + math.sin(ang) * radius)
+        cur = end_outer if i == steps else (center[0] + math.cos(ang) * radius, center[1] + math.sin(ang) * radius)
         triangles.append((center, prev, cur))
         prev = cur
 
 
-def _append_cap(triangles, point, direction, hw, left, right, cap, *, start):
+def _append_cap(triangles, point, direction, hw, left, right, cap, *, start, tolerance=None):
     if cap == "butt":
         return
     if cap == "square":
@@ -638,11 +707,11 @@ def _append_cap(triangles, point, direction, hw, left, right, cap, *, start):
         while a1 < a0:
             a1 += math.tau
         span = a1 - a0
-    steps = max(6, int(math.ceil(abs(span) / (math.pi / 10))))
+    steps = _arc_steps(span, hw, 6, tolerance)
     prev = right
     for i in range(1, steps + 1):
         ang = a0 + span * (i / steps)
-        cur = (point[0] + math.cos(ang) * hw, point[1] + math.sin(ang) * hw)
+        cur = left if i == steps else (point[0] + math.cos(ang) * hw, point[1] + math.sin(ang) * hw)
         triangles.append((point, prev, cur))
         prev = cur
 
@@ -722,14 +791,14 @@ def _contour_probe_point(points):
 
 
 def _quad_flat_enough(p0, p1, p2, tol):
-    return _distance_to_line(p1, p0, p2) <= tol
+    return _distance_to_chord(p1, p0, p2) <= tol
 
 
 def _cubic_flat_enough(p0, p1, p2, p3, tol):
-    return max(_distance_to_line(p1, p0, p3), _distance_to_line(p2, p0, p3)) <= tol
+    return max(_distance_to_chord(p1, p0, p3), _distance_to_chord(p2, p0, p3)) <= tol
 
 
-def _distance_to_line(p, a, b):
+def _distance_to_chord(p, a, b):
     ax, ay = a
     bx, by = b
     dx = bx - ax
@@ -737,7 +806,13 @@ def _distance_to_line(p, a, b):
     ln = math.hypot(dx, dy)
     if ln < 1e-12:
         return math.hypot(p[0] - ax, p[1] - ay)
-    return abs((p[0] - ax) * dy - (p[1] - ay) * dx) / ln
+    ux, uy = dx / ln, dy / ln
+    projection = (p[0] - ax) * ux + (p[1] - ay) * uy
+    if projection <= 0:
+        return math.hypot(p[0] - ax, p[1] - ay)
+    if projection >= ln:
+        return math.hypot(p[0] - bx, p[1] - by)
+    return abs((p[0] - ax) * uy - (p[1] - ay) * ux)
 
 
 def _point_in_polygon(poly, x, y):
@@ -826,23 +901,26 @@ def _decode_meshes(items, is_stroke=False, fill_rule=None):
 
 def flatten_commands(commands, *, tolerance=0.75, max_depth=10):
     if _accel_available("path_flatten"):
-        return _PATH_ACCEL.path_flatten(commands, max(0.05, float(tolerance)), max(1, int(max_depth)))
+        return _PATH_ACCEL.path_flatten(commands, _positive_tolerance(tolerance), max(1, int(max_depth)))
     return _flatten_commands_py(commands, tolerance=tolerance, max_depth=max_depth)
 
 
-def build_path_meshes(subpaths, *, fill_color, stroke_color, stroke_style, fill_rule="even_odd", offset=(0, 0)):
+def build_path_meshes(subpaths, *, fill_color, stroke_color, stroke_style, fill_rule="even_odd", offset=(0, 0), tolerance=None):
+    if tolerance is not None:
+        tolerance = _positive_tolerance(tolerance)
     if _accel_available("build_path_meshes"):
         fill_meshes, stroke_meshes = _PATH_ACCEL.build_path_meshes(
             subpaths, fill_color, stroke_color,
             float(stroke_style.width), str(stroke_style.join),
             str(stroke_style.cap), float(stroke_style.miter_limit), str(fill_rule),
             float(offset[0]), float(offset[1]),
+            0.0 if tolerance is None else tolerance,
         )
         return (_decode_meshes(fill_meshes, fill_rule=str(FillRule(fill_rule))),
                 _decode_meshes(stroke_meshes, is_stroke=True))
     return _build_path_meshes_py(
         subpaths, fill_color=fill_color, stroke_color=stroke_color,
-        stroke_style=stroke_style, fill_rule=fill_rule, offset=offset,
+        stroke_style=stroke_style, fill_rule=fill_rule, offset=offset, tolerance=tolerance,
     )
 
 

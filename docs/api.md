@@ -51,6 +51,19 @@ actions, hit testing, touch/mouse events and a physics world. `PhysicsBody`
 creates Box2D bodies. `scene.gpu` exposes Metal windows, buffers, textures,
 render/compute pipelines and blit operations for lower-level work.
 
+`Path` and `Polygon` tessellate curves and round strokes at the rendering
+resolution, accounting for display scale, node/parent and camera transforms,
+and capture size. Existing path commands need no changes. `curve_tolerance`
+remains an upper bound in local points; rendering refines it toward a subpixel
+error target. `curve_depth` bounds recursive subdivision (default 10), and
+round arcs are limited to 4096 segments, so extreme magnification can still
+reach a quality limit. Small scale changes reuse sufficiently detailed meshes.
+Actual corners between curve commands retain their shape.
+Curve bounds are measured from the original commands before Layer allocation,
+so increasing tessellation quality does not change the measured extent. Stroke
+bounds conservatively cover square caps and miter joins. Thumbnail textures use
+the requested pixel scale, including scales below one pixel per local point.
+
 `Scene.capture()` and `Node.capture(rect=...)` return an owned `ImageData` with
 RGBA pixels, in-memory PNG encoding, PNG saving and optional NumPy/Pillow
 conversion. `gpu.Texture.to_image(window)` provides low-level image readback.

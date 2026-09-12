@@ -420,7 +420,7 @@ class Layer(Node):
         try:
             if capture_viewport is not None:
                 renderer._capture_viewport = (lw, lh)
-                renderer.screen_scale *= rscale
+            renderer.screen_scale *= rscale
             for child in self.children:
                 child._collect(sub, renderer, local_root, 1.0, order)
             sub.sort(key=lambda c: (c.z, c.order))

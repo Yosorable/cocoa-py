@@ -69,8 +69,12 @@ Tile maps use the capture rectangle for visibility, so a complete map can be
 exported even when its logical dimensions exceed the window.
 Intermediate render textures and glyph atlases are also checked before allocation:
 they must fit 16,384 pixels per axis and 256 MiB of base pixel storage. Extreme
-shader or text magnification that exceeds these limits raises `ValueError`, even
-if the requested output image is small. Available GPU memory can impose lower
+shader, text or texture-rendered Path magnification that exceeds these limits
+raises `ValueError`, even if the requested output image is small. Paths inside
+Layers and custom Path emitters rasterize their full local bounds; they can reach
+this limit when exporting a small crop at high magnification. Their intermediate
+textures now follow the capture resolution instead of reusing a lower-resolution
+live texture. Available GPU memory can impose lower
 limits.
 
 ## ImageData
@@ -130,8 +134,8 @@ particles, move the camera or dispatch input. It restores node world transforms
 used for touch handling and invalidates render caches as needed. Temporary
 capture buffers and textures are released after capture, including failure paths.
 Capture uses separate text and glyph caches, so exporting different resolutions
-does not retain additional font atlases in the live scene. Layers keep their live
-textures, and shaders first initialized during capture are restored so their next
+does not retain additional font atlases in the live scene. Layers and Paths keep
+their live textures, and shaders first initialized during capture are restored so their next
 normal render uses the display resolution. Already initialized shaders use their
 current textures without advancing their simulation or feedback state.
 Custom node rendering callbacks retain their usual responsibility for avoiding

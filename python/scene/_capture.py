@@ -81,6 +81,7 @@ def _cold_shader_states(nodes):
 
 def capture(node, *, rect=None, size=None, background=None):
     from ._node import Layer
+    from ._path_node import Path
     from ._scene import Scene
 
     root = node._tree_root()
@@ -141,6 +142,10 @@ def capture(node, *, rect=None, size=None, background=None):
     layers = [(child, child._tex, child._lsize, child._lcenter, child._rscale,
                child._dirty, child._capture_center)
               for child, *_ in states if isinstance(child, Layer)]
+    path_texture_fields = ("_tex", "_path_size", "_path_center", "_rscale",
+                           "_texture_version", "_texture_pixel_scale", "_texture_size")
+    paths = [(child, tuple(getattr(child, name) for name in path_texture_fields))
+             for child, *_ in states if isinstance(child, Path)]
     shaders = _cold_shader_states(child for child, *_ in states)
     renderer._capturing = True
     renderer._active_frame_slot = None
@@ -156,6 +161,9 @@ def capture(node, *, rect=None, size=None, background=None):
             layer._tex = None
             layer._dirty = True
             layer._capture_center = None
+        for path, _ in paths:
+            path._tex = None
+            path._texture_version = -1
         # Capture collection uses different transforms and may rebuild cached
         # textures. Invalidate caches rather than restoring stale texture refs.
         for child, _, _, _ in states:
@@ -201,6 +209,11 @@ def capture(node, *, rect=None, size=None, background=None):
             layer._tex, layer._lsize, layer._lcenter = old_texture, logical_size, center
             layer._rscale, layer._dirty = render_scale, dirty
             layer._capture_center = capture_center
+        for path, previous in paths:
+            if path._tex is not None and path._tex is not previous[0]:
+                path._tex.close()
+            for name, value in zip(path_texture_fields, previous):
+                setattr(path, name, value)
         for _, buffer in renderer._buf_pool + renderer._buf_used:
             buffer.close()
         for image in renderer._tc.values():
