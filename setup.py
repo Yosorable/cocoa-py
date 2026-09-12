@@ -118,7 +118,8 @@ class AppleBuildExt(build_ext):
                 "xcrun", "clang++", "-std=c++17", "-fobjc-arc", "-O2", "-g0",
                 "-mmacosx-version-min=14.0", "-I" + sysconfig.get_paths()["include"],
                 *[arg for arch in sorted(architectures) for arg in ("-arch", arch)],
-                "-framework", "Foundation", "native/runner/CocoaPyRunner.mm", "-o", str(runner),
+                "-framework", "Foundation", "-framework", "UserNotifications",
+                "native/runner/CocoaPyRunner.mm", "-o", str(runner),
             ], check=True)
 
 

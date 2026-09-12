@@ -5,12 +5,27 @@
 #import <Foundation/Foundation.h>
 #include <dlfcn.h>
 #include <cstdio>
+#include "../common/CocoaPyNotifications.h"
+
+@interface CocoaPyRunnerNotifications : NSObject <UNUserNotificationCenterDelegate>
+@end
+@implementation CocoaPyRunnerNotifications
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+      willPresentNotification:(UNNotification *)notification
+        withCompletionHandler:(void (^)(UNNotificationPresentationOptions))completionHandler {
+    completionHandler(CocoaPyNotificationPresentation(notification.request));
+}
+@end
 
 int main(int argc, char **argv) {
     @autoreleasepool {
         if (argc < 4) {
             std::fprintf(stderr, "Use the cocoa-py command to launch this application.\n"); return 2;
         }
+        // This executable is the host. Library imports never install a delegate.
+        // The center's delegate is weak, so retain it for the entire Python run.
+        CocoaPyRunnerNotifications *delegate __attribute__((objc_precise_lifetime)) = [CocoaPyRunnerNotifications new];
+        UNUserNotificationCenter.currentNotificationCenter.delegate = delegate;
         void *library = dlopen(argv[1], RTLD_NOW | RTLD_GLOBAL);
         if (!library) { std::fprintf(stderr, "Cannot load CPython: %s\n", dlerror()); return 1; }
 #define LOAD_API(name) auto api_##name = reinterpret_cast<decltype(&name)>(dlsym(library, #name)); \

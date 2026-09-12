@@ -124,7 +124,10 @@ full-library read authorization. The library does not request always-on location
 or background location modes. Local notifications use Apple's explicit
 permission request; the library does not replace the host's notification delegate.
 The host determines foreground notification presentation and notification-tap
-handling.
+handling. To honor `notification.schedule(..., foreground=True)`, register the
+host's delegate before launch completes and apply the
+[cocoa-py foreground policy](notifications.md#host-integration). The library
+does not register a delegate or run Python when a notification is tapped.
 
 Keep UIKit's main loop running while Python executes on its worker thread. All
 UI presentation and Core Location setup are dispatched to that main thread with

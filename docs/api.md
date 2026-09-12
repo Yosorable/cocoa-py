@@ -166,11 +166,16 @@ if notification.request_permission() in {"authorized", "provisional"}:
     notification.cancel(identifier)
 ```
 
-`schedule(title, body="", delay=1, repeat=False, sound=True, identifier=None)`
-returns an identifier. Repetition requires at least 60 seconds. Reusing an ID
-replaces that pending notice. `pending()` lists this library's notices;
-`cancel(id)` removes that pending/delivered notice. `cancel_all()` cancels the
-currently pending library notices. Other host notices are preserved.
+`schedule()` accepts an immediate/delayed trigger, a timezone-aware `at` datetime,
+or a repeating `CalendarTrigger` for daily/weekly wall-clock times. Content
+includes title, subtitle, body, default sound or silence, and a foreground
+presentation preference. Reusing an identifier replaces its pending notice.
 
-Foreground presentation and notification activation belong to the host.
-Scheduling an alert does not imply that Focus settings allow immediate display.
+`settings()` queries individual authorization settings. `pending()` and
+`delivered()` list library notices; `cancel_pending()` and `remove_delivered()`
+manage those sets independently. The existing `cancel(id)` and `cancel_all()`
+retain their behavior. Other host notices are preserved.
+
+See [Local notifications](notifications.md) for signatures, result schemas,
+calendar examples and foreground delegate integration. The optional macOS
+launcher implements that integration; other hosts own their delegate policy.

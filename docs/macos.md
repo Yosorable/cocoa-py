@@ -62,7 +62,10 @@ its own app after Python times out.
   not imply GPS-quality fixes. Inspect each fix's reported accuracy.
 - Geocoder results depend on Apple's service, region and network availability.
 - Notifications require an app identity. The library schedules local notices
-  and does not replace a host application's notification delegate.
+  and does not replace a host application's notification delegate. The optional
+  launcher owns its delegate and supports foreground banners/list entries and
+  the per-notice `foreground` preference. Other hosts can adopt the same
+  [notification policy](notifications.md#host-integration).
 
 No module collects analytics or forwards user data to a cocoa-py server.
 Geocoding uses Apple's service; sharing sends only the items and destination the
