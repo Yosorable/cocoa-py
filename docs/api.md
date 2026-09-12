@@ -174,14 +174,26 @@ optional Pillow installation and platform details.
 
 ## Sharing
 
-`present(text=None, files=(), urls=(), timeout=300)` waits for the system share
-UI and returns `ShareResult(completed, activity)`. Put local paths in `files`
-and absolute non-file URLs in `urls`. No destination is chosen automatically.
+`present(text=None, files=(), urls=(), images=(), attachments=None, timeout=300)`
+waits for the system share UI and returns `ShareResult(completed, activity)`.
+Put local paths in `files` and absolute non-file URLs in `urls`. `images` accepts
+Pillow images and encoded image buffers; `attachments` maps filenames to exact
+binary buffers, such as `{"report.pdf": pdf_bytes}`. No destination is chosen
+automatically. Binary data is copied directly into native-owned storage.
 
 `open(...)` returns a `ShareRequest` immediately for callers that need explicit
-`done`, `wait(timeout)`, and `close()` control. Retain the request. Closing before
-selection dismisses the UI. A selected sharing service can finish independently;
-its source file access remains valid until completion.
+`done`, `wait(timeout)`, and `close()` control. Retain the request. On iOS,
+closing cancels visible sharing UI and removes temporary attachments after the
+asynchronous dismissal finishes. If UIKit already removed the local sheet for
+a handoff, or a macOS service was selected, native completion releases the files.
+Closing an unselected macOS picker cancels it immediately. Original files from
+`files` are never removed.
+
+User cancellation, including cancellation within a macOS service, returns
+`completed=False`; an actual service error raises `OSError`. `activity` contains
+an iOS activity type, a localized macOS service title, or `None`. It is not a
+portable service identifier or proof that a recipient received the content.
+See the [sharing guide](sharing.md) for data formats, ownership and examples.
 
 ## Device
 

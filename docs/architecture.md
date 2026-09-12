@@ -77,7 +77,17 @@ Host callbacks must remain loaded for the process lifetime. Each token stores it
 matching release function; worker-thread operations do not call Python.
 
 A sharing service may continue copying files after Python stops waiting. Its
-request retains file-access tokens until the native service reports completion.
+request retains file-access tokens through native completion or cancellation.
+Sharing adds a typed buffer argument to the private request bridge: Python
+containers are snapshotted and buffer contents are copied with the GIL held,
+before any UI or asynchronous service starts. Images become native image
+objects. Named buffers become files in a private `cocoa_py_share_*` temporary
+directory owned by the request; preparation failures, cancellation and service
+completion clean up that directory. Closing visible iOS UI dismisses it and
+retains files until the dismissal completes. A close during presentation is
+applied after presentation finishes; item-fetch callbacks are not selection
+notifications. An iOS handoff that already removed the sheet, or a selected
+macOS service, retains files until the service's completion callback.
 Other location, motion and picker requests stop or dismiss when closed.
 
 ## Platforms and import behavior

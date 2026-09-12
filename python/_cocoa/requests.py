@@ -33,11 +33,12 @@ class Request:
     started may finish in its own application after the request is closed.
     """
 
-    def __init__(self, operation, options, convert=lambda value: value):
+    def __init__(self, operation, options, convert=lambda value: value, *, _buffers=None):
         self._handle = None
         self._convert = convert
         self._state = {"done": False, "closed": False}
-        self._handle = _system.start(operation, json.dumps(options, allow_nan=False))
+        arguments = (operation, json.dumps(options, allow_nan=False))
+        self._handle = _system.start(*arguments) if _buffers is None else _system.start(*arguments, _buffers)
         try:
             self._snapshot(0, consume=False)
         except BaseException:

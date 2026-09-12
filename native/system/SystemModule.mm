@@ -8,6 +8,7 @@
 #include "Motion.h"
 #include "Notification.h"
 #include "Share.h"
+#include "ShareBridge.h"
 
 static CocoaPyRequest *CocoaPyStart(NSString *name, NSDictionary *args) {
     if ([name hasPrefix:@"location."]) return CocoaPyLocation(name, args);
@@ -32,7 +33,8 @@ static void CocoaPyReleaseRequest(PyObject *capsule) {
 }
 static PyObject *system_start(PyObject *, PyObject *args) {
     const char *operation, *json; Py_ssize_t length;
-    if (!PyArg_ParseTuple(args, "ss#", &operation, &json, &length)) return nullptr;
+    PyObject *buffers = Py_None;
+    if (!PyArg_ParseTuple(args, "ss#|O", &operation, &json, &length, &buffers)) return nullptr;
     @autoreleasepool {
         NSString *name = [NSString stringWithUTF8String:operation];
         NSError *error;
@@ -40,6 +42,12 @@ static PyObject *system_start(PyObject *, PyObject *args) {
                                                     options:0 error:&error];
         if (![payload isKindOfClass:NSDictionary.class]) {
             PyErr_SetString(PyExc_ValueError, "The operation payload must be a JSON object."); return nullptr;
+        }
+        if ([name isEqual:@"share.present"]) {
+            payload = [payload mutableCopy];
+            if (!CocoaPyShareBuffers(buffers, payload)) return nullptr;
+        } else if (buffers != Py_None) {
+            PyErr_SetString(PyExc_TypeError, "Only sharing accepts binary buffers."); return nullptr;
         }
 #if !COCOA_PY_UIKIT
         if (!NSThread.isMainThread && !NSApp.isRunning) {
@@ -58,7 +66,13 @@ static PyObject *system_start(PyObject *, PyObject *args) {
         Py_END_ALLOW_THREADS
         void *pointer = (__bridge_retained void *)request;
         PyObject *capsule = PyCapsule_New(pointer, "cocoa-py.request", CocoaPyReleaseRequest);
-        if (!capsule) { CFBridgingRelease(pointer); }
+        if (!capsule) {
+            CFBridgingRelease(pointer);
+            // A sharing request may already be retained by its presentation.
+            // Reclaim it even when Python cannot allocate the owning handle.
+            if (NSThread.isMainThread) [request close];
+            else dispatch_async(dispatch_get_main_queue(), ^{ [request close]; });
+        }
         return capsule;
     }
 }
