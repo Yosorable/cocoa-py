@@ -13,7 +13,7 @@ One distribution provides independent top-level imports:
 | `photos` | System media picker and saving images/videos to Photos. |
 | `location` | Foreground location fixes, bounded update streams and address geocoding. |
 | `motion` | Bounded iOS accelerometer, gyroscope, magnetometer and device-motion streams. |
-| `clipboard` | Text and typed byte representations on the system clipboard. |
+| `clipboard` | Text, URLs, images, multiple representations and clipboard state queries. |
 | `share` | System sharing UI for text, URLs and files. |
 | `device` | OS, hardware, power, battery and storage information. |
 | `notification` | Permission, scheduling and management of local notifications. |

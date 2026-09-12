@@ -27,6 +27,7 @@ classifiers = [
 
 [project.optional-dependencies]
 coreml = ["numpy>=2.3.3,<3"]
+images = ["Pillow"]
 
 [project.urls]
 Source = "https://github.com/Yosorable/cocoa-py"

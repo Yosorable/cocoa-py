@@ -49,7 +49,7 @@ CPython 3.14 on macOS and Apple's command-line tools and SDK:
 ```sh
 python3.14 -m pip install build
 MACOSX_DEPLOYMENT_TARGET=14.0 python3.14 -m build
-python3.14 -m pip install --force-reinstall '.[coreml]'
+python3.14 -m pip install --force-reinstall '.[coreml,images]'
 python3.14 -m unittest discover -s tests -v
 ```
 

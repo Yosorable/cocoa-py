@@ -56,8 +56,9 @@ its own app after Python times out.
 
 - `motion.available()` reports false for phone sensors on native macOS.
 - `device.battery()` returns an unavailable state on a desktop without a battery.
-- Desktop clipboard expiration and `local_only` are not provided by NSPasteboard;
-  requesting these options raises `NotImplementedError`.
+- Clipboard `local_only=True` uses AppKit's current-host-only option.
+  Clipboard expiration is unavailable on macOS; `expires_in` raises
+  `NotImplementedError` before changing the existing contents.
 - Location quality depends on available hardware and system settings; a Mac does
   not imply GPS-quality fixes. Inspect each fix's reported accuracy.
 - Geocoder results depend on Apple's service, region and network availability.

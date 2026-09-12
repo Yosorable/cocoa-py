@@ -125,14 +125,33 @@ Native macOS raises `NotImplementedError` when starting phone sensors.
 
 ## Clipboard
 
-`read_text()` returns str or None; `write_text(text)` replaces all items.
-`types()` lists UTI strings. `read_bytes(type)` and
-`write_bytes(data, type="public.png")` handle one typed representation; `clear()`
-removes all items. iOS can prompt when pasting another app's content.
+`read_text()` and `read_url()` return the first item's text or typed URL, or
+`None`. `write_text(text)` and `write_url(url)` replace all items; URL writes
+include a plain-text fallback. `read_image()` returns a Pillow image, while
+`read_image(as_bytes=True)` returns PNG bytes without Pillow. `write_image(image)`
+accepts a Pillow image or encoded image buffer and writes a still PNG.
 
-`write_text(..., local_only=True, expires_in=60)` supports iOS's device-local
-clipboard and expiration options. These options raise `NotImplementedError` on
-macOS. Importing the module does not inspect the clipboard.
+The OS may add a URL representation after `write_text()`; `read_url()` and
+`has_urls()` honor the types it advertises. Use `write_url()` to explicitly
+supply a URL and its text fallback on both platforms.
+
+`types()` lists the first item's UTI strings. `read_bytes(type)` and
+`write_bytes(data, type="public.png")` transfer binary buffers directly.
+`write_item({type: data, ...})` writes several representations of one item, such
+as HTML and plain text together. Every write replaces all previous items;
+`clear()` removes them. Empty bytes are distinct from a missing representation.
+
+All writes accept `local_only=True` on iOS and macOS to prevent Universal
+Clipboard transfer. `expires_in=60` adds an iOS expiration; macOS rejects
+expiration before changing the clipboard.
+
+`has_text()`, `has_image()`, and `has_urls()` inspect advertised types across
+all items without fetching their contents. `change_count()` reports the OS
+change counter. Content reads may invoke system paste permission. Importing the
+module does not inspect the clipboard or import Pillow.
+
+See the [clipboard guide](clipboard.md) for examples, format handling, validation,
+optional Pillow installation and platform details.
 
 ## Sharing
 

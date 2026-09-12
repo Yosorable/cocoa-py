@@ -37,9 +37,13 @@ these binaries in a directory does not combine their engine state or dependencie
 
 Python handles composition, typed results, timeout policy and blocking PCM
 backpressure. Native code validates input and owns Apple framework resources.
-Delegate and render callbacks do not call Python. System services return
-serializable snapshots to a Python polling loop that releases the GIL while
-waiting and checks interrupts between bounded waits.
+Delegate and render callbacks do not call Python. Asynchronous system services
+return serializable snapshots to a Python polling loop that releases the GIL
+while waiting and checks interrupts between bounded waits. Clipboard calls use
+a synchronous typed bridge in the same extension: buffers become owned native
+data before releasing the GIL, and results become Python bytes after reacquiring
+it. They do not encode binary content as JSON or Base64. All clipboard framework
+access stays on the main thread.
 
 Each system request owns its manager or controller. Sensor streams have bounded
 queues and discard their oldest samples on overflow, with an observable counter.

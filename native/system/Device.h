@@ -40,7 +40,7 @@ static NSDictionary *CocoaPyBattery() {
 #endif
 }
 
-static CocoaPyRequest *CocoaPyDeviceClipboard(NSString *name, NSDictionary *args) {
+static CocoaPyRequest *CocoaPyDevice(NSString *name, NSDictionary *args) {
     if ([name isEqual:@"device.info"]) {
         struct utsname hardware; uname(&hardware);
         NSProcessInfo *process = NSProcessInfo.processInfo;
@@ -63,73 +63,5 @@ static CocoaPyRequest *CocoaPyDeviceClipboard(NSString *name, NSDictionary *args
         if (!attributes) return CocoaPyFailure(@"os", error.localizedDescription);
         return CocoaPyValue(@{ @"total": attributes[NSFileSystemSize], @"free": attributes[NSFileSystemFreeSize] });
     }
-#if COCOA_PY_UIKIT
-    UIPasteboard *pasteboard = UIPasteboard.generalPasteboard;
-#else
-    NSPasteboard *pasteboard = NSPasteboard.generalPasteboard;
-#endif
-    if ([name isEqual:@"clipboard.read_text"]) {
-#if COCOA_PY_UIKIT
-        return CocoaPyValue(pasteboard.string);
-#else
-        return CocoaPyValue([pasteboard stringForType:NSPasteboardTypeString]);
-#endif
-    }
-    if ([name isEqual:@"clipboard.types"]) {
-#if COCOA_PY_UIKIT
-        return CocoaPyValue(pasteboard.pasteboardTypes ?: @[]);
-#else
-        return CocoaPyValue(pasteboard.types ?: @[]);
-#endif
-    }
-    if ([name isEqual:@"clipboard.clear"]) {
-#if COCOA_PY_UIKIT
-        pasteboard.items = @[];
-#else
-        [pasteboard clearContents];
-#endif
-        return CocoaPyValue(nil);
-    }
-    if ([name isEqual:@"clipboard.write_text"]) {
-        if (!CocoaPyString(args, @"text", YES)) return CocoaPyFailure(@"value", @"text must be a string.");
-#if COCOA_PY_UIKIT
-        NSMutableDictionary *options = [NSMutableDictionary dictionary];
-        options[UIPasteboardOptionLocalOnly] = @([args[@"local_only"] boolValue]);
-        if (args[@"expires_in"] != NSNull.null) {
-            if (!CocoaPyNumber(args, @"expires_in", 0.001, 31536000)) return CocoaPyFailure(@"value", @"expires_in must be positive.");
-            options[UIPasteboardOptionExpirationDate] = [NSDate dateWithTimeIntervalSinceNow:[args[@"expires_in"] doubleValue]];
-        }
-        [pasteboard setItems:@[@{ @"public.utf8-plain-text": args[@"text"] }] options:options];
-#else
-        if ([args[@"local_only"] boolValue] || (args[@"expires_in"] && args[@"expires_in"] != NSNull.null))
-            return CocoaPyFailure(@"not_implemented", @"Clipboard expiration and local_only require iOS.");
-        [pasteboard clearContents];
-        if (![pasteboard setString:args[@"text"] forType:NSPasteboardTypeString])
-            return CocoaPyFailure(@"os", @"The clipboard rejected the text.");
-#endif
-        return CocoaPyValue(nil);
-    }
-    if ([name isEqual:@"clipboard.read_bytes"]) {
-        if (!CocoaPyString(args, @"type")) return CocoaPyFailure(@"value", @"type must be a nonempty string.");
-#if COCOA_PY_UIKIT
-        NSData *data = [pasteboard dataForPasteboardType:args[@"type"]];
-#else
-        NSData *data = [pasteboard dataForType:args[@"type"]];
-#endif
-        return CocoaPyValue(data ? [data base64EncodedStringWithOptions:0] : nil);
-    }
-    if ([name isEqual:@"clipboard.write_bytes"]) {
-        if (!CocoaPyString(args, @"type") || !CocoaPyString(args, @"data", YES))
-            return CocoaPyFailure(@"value", @"type and base64 data must be strings.");
-        NSData *data = [[NSData alloc] initWithBase64EncodedString:args[@"data"] options:0];
-        if (!data) return CocoaPyFailure(@"value", @"Invalid base64 data.");
-#if COCOA_PY_UIKIT
-        pasteboard.items = @[@{ args[@"type"]: data }];
-#else
-        [pasteboard clearContents];
-        if (![pasteboard setData:data forType:args[@"type"]]) return CocoaPyFailure(@"os", @"The clipboard rejected the data.");
-#endif
-        return CocoaPyValue(nil);
-    }
-    return CocoaPyFailure(@"value", @"Unknown device or clipboard operation.");
+    return CocoaPyFailure(@"value", @"Unknown device operation.");
 }
