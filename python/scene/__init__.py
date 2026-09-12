@@ -10,6 +10,7 @@ from ._layout import HStack, Spacer, VStack, ZStack
 from ._shapes import Circle, Line, Rect
 from ._path_node import Path, Polygon
 from ._text import Image, Label
+from ._text_input import TextField, TextView, TextInputSession
 from ._sprite import NineSlice, Sprite, SpriteAtlas
 from ._particle import ParticleEmitter
 from ._tilemap import TileMap, TileSet, load_tiled

@@ -2212,18 +2212,20 @@ static void handle_unknown_emit(PyObject *node, CNodeCache *cache, CollectState 
         if (tex == Py_None) Py_DECREF(tex);
     };
 
-    /* Free old dynamic cmds */
+    /* parse_cmd transfers the new texture reference returned by GetAttr.
+       Retire every old slot before replacing it, including fixed slots. */
     if (cache->dyn_cmds) {
         for (int i = 0; i < cache->dyn_count; i++) Py_XDECREF(cache->dyn_cmds[i].texture);
     }
-    int old_cmd_count = cache->cmd_count;
+    for (int i = 0; i < cache->cmd_count; i++) {
+        Py_CLEAR(cache->cmds[i].texture);
+    }
 
     if (n <= 2) {
         /* Small: store in fixed cmds[2] */
         cache->cmd_count = 0;
         for (Py_ssize_t i = 0; i < n; i++) {
             parse_cmd(PyList_GET_ITEM(py_cmds, i), &cache->cmds[cache->cmd_count]);
-            Py_XINCREF(cache->cmds[cache->cmd_count].texture);
             cache->cmd_count++;
         }
         /* Clear dyn */
@@ -2239,12 +2241,7 @@ static void handle_unknown_emit(PyObject *node, CNodeCache *cache, CollectState 
         cache->dyn_count = (int)n;
         for (Py_ssize_t i = 0; i < n; i++) {
             parse_cmd(PyList_GET_ITEM(py_cmds, i), &cache->dyn_cmds[i]);
-            Py_XINCREF(cache->dyn_cmds[i].texture);
         }
-    }
-
-    for (int i = cache->cmd_count; i < old_cmd_count; i++) {
-        Py_XDECREF(cache->cmds[i].texture); cache->cmds[i].texture = NULL;
     }
 
     Py_DECREF(py_cmds); Py_DECREF(world_tuple); Py_DECREF(py_order);

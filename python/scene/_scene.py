@@ -70,6 +70,38 @@ class Scene(Node):
     def touch_ended(self, touch: Touch):
         pass
 
+    def keyboard_changed(self, frame):
+        """The software keyboard's screen-space rectangle changed (or is None)."""
+        pass
+
+    @property
+    def keyboard_frame(self):
+        if not getattr(self, "_text_inputs", None):
+            return None
+        return _metal.text_input_keyboard(self._window.handle)
+
+    @property
+    def focused_input(self):
+        return next((node for node in getattr(self, "_text_inputs", {}).values() if node.focused), None)
+
+    def dismiss_keyboard(self):
+        for node in list(getattr(self, "_text_inputs", {}).values()):
+            node.blur()
+
+    def focus_next_input(self, current=None, *, reverse=False):
+        from ._text_input import _input_nodes
+
+        nodes = [node for node, _, _, visible in _input_nodes(self)
+                 if visible and node.enabled and not node.read_only and not node._closed]
+        if not nodes:
+            return None
+        current = self.focused_input if current is None else current
+        step = -1 if reverse else 1
+        index = nodes.index(current) if current in nodes else (0 if reverse else -1)
+        target = nodes[(index + step) % len(nodes)]
+        target.focus()
+        return target
+
     # ── built-in ──
 
     @property
@@ -143,6 +175,9 @@ class Scene(Node):
         self._render_metrics_key = None
         self._touch_owners: dict[int, Node] = {}
         self._gesture_nodes: set = set()
+        self._text_inputs = {}
+        self._keyboard_frame = None
+        self._text_input_offscreen = False
         self._director = None
 
     def _frame(self, dt):
@@ -162,6 +197,13 @@ class Scene(Node):
         self.elapsed += scene_dt
         self.frame += 1
         self._window.sync()
+
+        from ._text_input import process_inputs
+        process_inputs(self)
+        keyboard = self.keyboard_frame
+        if keyboard != self._keyboard_frame:
+            self._keyboard_frame = keyboard
+            self.keyboard_changed(keyboard)
 
         sz = self._window.size
         if sz != self._prev_size:
@@ -194,7 +236,14 @@ class Scene(Node):
         return cam
 
     def _render(self, target_texture=None):
+        from ._text_input import sync_inputs
+
         self._renderer.screen_scale = self._window.scale
+        self._renderer._text_input_offscreen = target_texture is not None
+        if self._text_input_offscreen != (target_texture is not None):
+            self._text_input_offscreen = target_texture is not None
+            for control in self._text_inputs.values():
+                control._changed()
         if target_texture is None:
             self._renderer._begin_onscreen_slot()
         root_tf = self._camera_root_transform()
@@ -217,6 +266,7 @@ class Scene(Node):
             self._render_fingerprint = int(result[1])
             if target_texture is None:
                 self._renderer._abort_onscreen_slot()
+                sync_inputs(self)
             return
 
         try:
@@ -247,6 +297,8 @@ class Scene(Node):
             if target_texture is None:
                 self._renderer._abort_onscreen_slot()
             raise
+        if target_texture is None:
+            sync_inputs(self)
 
     def _process_touches(self):
         for e in self._window.consume_touches():
@@ -258,6 +310,14 @@ class Scene(Node):
 
             if phase == "began":
                 node = self.hit_test(t.position[0], t.position[1])
+                from ._text_input import _TextInput
+                input_node = node
+                while input_node is not None and not isinstance(input_node, _TextInput):
+                    input_node = input_node.parent
+                if self._text_inputs and (input_node is None or not input_node.enabled):
+                    for control in list(self._text_inputs.values()):
+                        if isinstance(control, _TextInput):
+                            control.blur()
                 owner = self._dispatch_touch(node, 'on_touch_began', t)
                 if owner is not None:
                     self._touch_owners[t.id] = owner
@@ -349,6 +409,11 @@ class Scene(Node):
         self._director._present(scene_or_class, transition)
 
     def _close(self):
+        for handle, node in list(self._text_inputs.items()):
+            try:
+                node.blur()
+            except KeyError:
+                pass
         try:
             self.stop()
         except Exception:
@@ -359,6 +424,9 @@ class Scene(Node):
             self._physics_world.destroy()
             self._physics_world = None
         Node.close(self)
+        # Input sessions are intentionally outside the drawable node tree.
+        for session in list(self._text_inputs.values()):
+            session.close()
         self._interactive_nodes = []
         self._touch_owners.clear()
         self._gesture_nodes.clear()
@@ -434,6 +502,8 @@ class _SceneDirector:
             old._director = None
             old._close()
         else:
+            from ._text_input import suspend_inputs
+            suspend_inputs(self._current)
             self._incoming = incoming
             self._transition = transition
             self._transition_elapsed = 0.0

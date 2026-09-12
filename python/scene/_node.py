@@ -136,6 +136,9 @@ class Node:
     @staticmethod
     def _cleanup_subtree(scene, node, *, preserve_physics=False):
         Node._drop_internal_caches(node)
+        detach_input = getattr(node, "_detach_text_input", None)
+        if detach_input is not None and not preserve_physics:
+            detach_input()
         stale = [tid for tid, owner in scene._touch_owners.items() if owner is node]
         for tid in stale:
             del scene._touch_owners[tid]

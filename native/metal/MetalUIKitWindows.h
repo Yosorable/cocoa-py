@@ -115,6 +115,7 @@ static PyObject *metal_close_window(PyObject *self, PyObject *args) {
     }
 
     runOnMainSync(^{
+        metalCloseTextInputsForWindow(handle);
         std::lock_guard<std::mutex> lock(gStateMutex);
         auto it = gWindows.find(handle);
         if (it == gWindows.end()) {

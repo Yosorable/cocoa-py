@@ -354,6 +354,10 @@ static TextureRecord *textureRecord(long long handle) {
     return it == gTextures.end() ? nullptr : &it->second;
 }
 
+#include "MetalTextInput.h"
+#include "MetalTextInputBridge.h"
+#include "MetalTextInputSnapshot.h"
+
 #if COCOA_PY_UIKIT
 #include "MetalUIKitWindows.h"
 #else
@@ -2412,6 +2416,7 @@ static PyObject *metal_resource_counts(PyObject *self, PyObject *args) {
     dictSetUnsigned(dict, "textures", (unsigned long long)gTextures.size());
     dictSetUnsigned(dict, "texture_bytes", textureBytes);
     dictSetUnsigned(dict, "windows", (unsigned long long)gWindows.size());
+    dictSetUnsigned(dict, "text_inputs", gTextInputCount.load(std::memory_order_relaxed));
     dictSetUnsigned(dict, "window_texture_bytes", windowTextureBytes);
     dictSetUnsigned(dict, "active_frames", activeFrames);
     dictSetUnsigned(dict, "active_compute_passes", activeCompute);
@@ -2429,6 +2434,17 @@ static PyObject *metal_resource_counts(PyObject *self, PyObject *args) {
 #include "MetalImages.h"
 
 static PyMethodDef metalMethods[] = {
+    {"text_input_normalize", metal_text_input_normalize, METH_VARARGS, "Normalize plain text and its grapheme limit."},
+    {"text_input_create", metal_text_input_create, METH_VARARGS, "Create a native scene text editor."},
+    {"text_input_update", metal_text_input_update, METH_VARARGS, "Update text editor options."},
+    {"text_input_command", metal_text_input_command, METH_VARARGS, "Perform a text editing command."},
+    {"text_input_state", metal_text_input_state, METH_VARARGS, "Read a text editor state."},
+    {"text_input_frame", metal_text_input_frame, METH_VARARGS, "Place a text editor in its scene window."},
+    {"text_input_anchor", metal_text_input_anchor, METH_VARARGS, "Position input-method UI for an application-drawn caret."},
+    {"text_input_events", metal_text_input_events, METH_VARARGS, "Consume text editing events."},
+    {"text_input_close", metal_text_input_close, METH_VARARGS, "Release a text editor."},
+    {"text_input_snapshot", metal_text_input_snapshot, METH_VARARGS, "Rasterize a text editor without changing its editing state."},
+    {"text_input_keyboard", metal_text_input_keyboard, METH_VARARGS, "Return the current software keyboard rectangle."},
     {"prepare_image_capture", metal_prepare_image_capture, METH_VARARGS, "Wait for preceding scene draws before image capture."},
     {"read_texture_image", (PyCFunction)metal_read_texture_image, METH_VARARGS | METH_KEYWORDS, "Read an RGBA image after completing queued rendering."},
     {"encode_png", metal_encode_png, METH_VARARGS, "Encode straight RGBA bytes as PNG."},

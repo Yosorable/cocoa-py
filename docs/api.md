@@ -70,6 +70,16 @@ conversion. `gpu.Texture.to_image(window)` provides low-level image readback.
 See [scene capture and image export](scene-capture.md) for coordinates, alpha,
 resolution and lifetime rules, and a drawing/export example.
 
+`TextField` and `TextView` add single-line and multiline native text editing,
+including input methods, selection, secure entry, undo/redo and iOS keyboard
+configuration. See [scene text input](scene-text-input.md) for options,
+callbacks, keyboard avoidance and native overlay behavior.
+
+`TextInputSession` exposes the same editing model without a drawable input
+component. Call `session.begin(scene)` / `session.end()` and draw the text,
+selection and caret yourself. Its `caret_rect` positions input-method UI, while
+`Scene.keyboard_changed()` lets a custom interface respond to the keyboard.
+
 macOS uses mouse input and resizable AppKit windows. iOS keeps UIKit touch input.
 Window orientation options select an initial desktop aspect ratio. Close windows
 and GPU resources explicitly, or use their supported context managers.

@@ -66,6 +66,7 @@ static PyObject *metal_close_window(PyObject *, PyObject *args) {
     }
     if (pool) objc_autoreleasePoolPop(pool);
     runOnMainSync(^{
+        metalCloseTextInputsForWindow(handle);
         std::lock_guard<std::mutex> lock(gStateMutex);
         auto it = gWindows.find(handle);
         if (it == gWindows.end()) return;
