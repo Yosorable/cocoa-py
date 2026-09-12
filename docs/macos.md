@@ -56,6 +56,8 @@ its own app after Python times out.
 
 - `motion.available()` reports false for phone sensors on native macOS.
 - `device.battery()` returns an unavailable state on a desktop without a battery.
+  A connected battery that is neither charging nor reported charged returns
+  `not_charging`; `full` follows the OS charged flag, not just external power.
 - Clipboard `local_only=True` uses AppKit's current-host-only option.
   Clipboard expiration is unavailable on macOS; `expires_in` raises
   `NotImplementedError` before changing the existing contents.

@@ -28,9 +28,11 @@ static NSDictionary *CocoaPyBattery() {
             double maximum = [source[@kIOPSMaxCapacityKey] doubleValue];
             double current = [source[@kIOPSCurrentCapacityKey] doubleValue];
             BOOL ac = [source[@kIOPSPowerSourceStateKey] isEqual:@kIOPSACPowerValue];
+            // External power alone does not mean the battery has finished charging.
+            BOOL charged = [source[@kIOPSIsChargedKey] boolValue];
             value = @{ @"level": maximum > 0 ? @(current / maximum) : NSNull.null,
                        @"state": [source[@kIOPSIsChargingKey] boolValue] ? @"charging" :
-                                  ac ? @"full" : @"unplugged" };
+                                  ac ? (charged ? @"full" : @"not_charging") : @"unplugged" };
             break;
         }
         CFRelease(sources);

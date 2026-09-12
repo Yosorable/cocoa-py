@@ -16,7 +16,13 @@ def info() -> dict:
 
 
 def battery() -> dict:
-    """Return level (0..1 or None) and state; desktops may report unavailable."""
+    """Return level (0..1 or None) and state.
+
+    States are charging, full, unplugged, unknown, or unavailable. macOS also
+    reports not_charging when connected to external power without charging or
+    being reported charged by the OS. full follows the OS charged state, which
+    need not mean exactly 100 percent. Desktops without a battery are unavailable.
+    """
     return _call("device.battery")
 
 
