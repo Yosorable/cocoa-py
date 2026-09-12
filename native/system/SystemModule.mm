@@ -72,7 +72,9 @@ static PyObject *system_poll(PyObject *, PyObject *args) {
     }
     @autoreleasepool {
         BOOL ready;
-        @synchronized(request) { ready = request.done || request.closed || request.samples.count; }
+        @synchronized(request) {
+            ready = request.done || request.closed || (consume && request.samples.count);
+        }
         if (!ready && seconds > 0) {
             Py_BEGIN_ALLOW_THREADS
             CocoaPyWaitSemaphore(request.signal, seconds);

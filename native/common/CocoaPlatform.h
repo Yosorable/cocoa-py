@@ -82,20 +82,20 @@ static inline void CocoaPyRunOnMain(dispatch_block_t block) {
 // Call without the GIL. A desktop Python script normally occupies the main
 // thread, so asynchronous Apple APIs need its run loop serviced while waiting.
 static inline bool CocoaPyWaitSemaphore(dispatch_semaphore_t semaphore, double seconds) {
+    // Background threads need no run-loop pumping or intermediate timeouts.
+    if (!NSThread.isMainThread)
+        return dispatch_semaphore_wait(semaphore,
+            dispatch_time(DISPATCH_TIME_NOW, (int64_t)(seconds * NSEC_PER_SEC))) == 0;
+
     using Clock = std::chrono::steady_clock;
     auto deadline = Clock::now() + std::chrono::duration<double>(seconds);
     do {
         if (dispatch_semaphore_wait(semaphore, DISPATCH_TIME_NOW) == 0) return true;
-        if (NSThread.isMainThread) {
 #if !COCOA_PY_UIKIT
-            CocoaPyPumpEvents();
+        CocoaPyPumpEvents();
 #endif
-            auto result = CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, true);
-            if (result == kCFRunLoopRunFinished) std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        } else if (dispatch_semaphore_wait(semaphore,
-                    dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_MSEC)) == 0) {
-            return true;
-        }
+        auto result = CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, true);
+        if (result == kCFRunLoopRunFinished) std::this_thread::sleep_for(std::chrono::milliseconds(1));
     } while (Clock::now() < deadline);
     return dispatch_semaphore_wait(semaphore, DISPATCH_TIME_NOW) == 0;
 }

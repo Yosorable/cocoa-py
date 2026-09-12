@@ -67,6 +67,7 @@ class Request:
         """Return the result, or raise TimeoutError without closing the request."""
         timeout = seconds(timeout, allow_none=True)
         deadline = None if timeout is None else time.monotonic() + timeout
+        # Returning to Python between bounded waits allows injected interrupts.
         while True:
             remaining = 0.05 if deadline is None else max(0, min(0.05, deadline - time.monotonic()))
             state = self._snapshot(remaining, consume=False)

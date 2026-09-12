@@ -45,6 +45,13 @@ data before releasing the GIL, and results become Python bytes after reacquiring
 it. They do not encode binary content as JSON or Base64. All clipboard framework
 access stays on the main thread.
 
+Request waits return to Python at intervals of up to 50 milliseconds so injected
+interrupts can be delivered. Background threads block on a semaphore for each
+interval and wake early on notification; the main thread services its event
+loop while waiting. A sample's pending wake is retired when its queue becomes
+empty, under the same lock as the producer's notification. Waiting for completion
+does not treat unread stream samples as a completed operation.
+
 Each system request owns its manager or controller. Sensor streams have bounded
 queues and discard their oldest samples on overflow, with an observable counter.
 A context manager or `close()` stops the producer; capsule destruction also

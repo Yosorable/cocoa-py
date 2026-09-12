@@ -55,19 +55,24 @@
     dispatch_semaphore_signal(_signal);
 }
 - (void)push:(id)value {
-    BOOL wasEmpty;
     @synchronized(self) {
         if (_closed || _done) return;
-        wasEmpty = !_samples.count;
+        BOOL wasEmpty = !_samples.count;
         if (_samples.count == _capacity) { [_samples removeObjectAtIndex:0]; _dropped++; }
         [_samples addObject:value];
+        // Publish the wake before a consumer can take the last queued sample.
+        if (wasEmpty) dispatch_semaphore_signal(_signal);
     }
-    if (wasEmpty) dispatch_semaphore_signal(_signal);
 }
 - (NSDictionary *)snapshot:(BOOL)consume {
     @synchronized(self) {
         id sample = _samples.firstObject ?: NSNull.null;
-        if (consume && _samples.count) [_samples removeObjectAtIndex:0];
+        if (consume && _samples.count) {
+            [_samples removeObjectAtIndex:0];
+            // A ready poll can read without waiting. Retire its queued wake
+            // under the same lock as push, without touching a later arrival.
+            if (!_samples.count) dispatch_semaphore_wait(_signal, DISPATCH_TIME_NOW);
+        }
         return @{ @"done": @(_done), @"closed": @(_closed),
                   @"result": _result ?: NSNull.null, @"error": _failure ?: NSNull.null,
                   @"sample": sample, @"buffered": @(_samples.count),
