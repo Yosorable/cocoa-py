@@ -14,7 +14,7 @@ from ._node import Node
 # ───────────────────────────────────────────────────────────────────────────
 
 _PARTICLE_PACK = struct.Struct("<16f")   # matches Metal Particle struct (64 bytes)
-_PARTICLE_UNI  = struct.Struct("<8f")    # matches ParticleUniforms (32 bytes)
+_PARTICLE_UNI  = struct.Struct("<16f")   # matches ParticleUniforms (64 bytes)
 _PARTICLE_BYTES = _PARTICLE_PACK.size    # 64
 _DEAD_PARTICLE = _PARTICLE_PACK.pack(0,0, 0,0, -999,1, 1,1, 0,0,0,0, 1,0, 0,0)
 
@@ -183,14 +183,17 @@ class ParticleEmitter(Node):
         if self._pbuf is None:
             self._init_gpu(renderer)
 
-    def _render_particles(self, frame, renderer, opacity, *, msaa=False):
+    def _render_particles(self, frame, renderer, opacity, *, msaa=False,
+                          resolution=None, transform=None):
         """Called during the render pass to issue the instanced draw call."""
         if self._pbuf is None:
             return
-        res = renderer.window.size
+        res = renderer.window.size if resolution is None else resolution
+        transform = _IDENTITY if transform is None else transform
         gx, gy = self.gravity
         self._ubuf.write(_PARTICLE_UNI.pack(
-            res[0], res[1], self._time, gx, gy, opacity, 0, 0))
+            res[0], res[1], self._time, gx, gy, opacity, 0, 0,
+            *transform, 0, 0))
         tex = self.texture
         if tex is not None:
             frame.set_pipeline(renderer._pp_tex_ms if msaa else renderer._pp_tex)

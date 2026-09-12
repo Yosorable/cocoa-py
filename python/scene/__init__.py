@@ -17,6 +17,7 @@ from ._shader import ShaderNode
 from ._composite import RadialLabels, RadialTicks
 from ._camera import Camera
 from ._scene import Scene, run
+from ._image_data import ImageData
 
 
 _PHYSICS_NAMES = {

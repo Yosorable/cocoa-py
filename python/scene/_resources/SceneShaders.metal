@@ -200,6 +200,9 @@ struct ParticleUniforms {
     float  gravity_y;
     float  node_opacity;
     float2 _pad;
+    float4 image_linear;
+    float2 image_translation;
+    float2 _image_pad;
 };
 
 struct ParticleOut {
@@ -236,6 +239,8 @@ vertex ParticleOut particle_vs(uint vid [[vertex_id]],
     };
     float2 corner = corners[vid];
     float2 sp = pos + corner * sz;
+    sp = float2(u.image_linear.x * sp.x + u.image_linear.z * sp.y,
+                u.image_linear.y * sp.x + u.image_linear.w * sp.y) + u.image_translation;
 
     // Screen coords → NDC
     float2 ndc = float2(sp.x / u.resolution.x * 2.0 - 1.0,

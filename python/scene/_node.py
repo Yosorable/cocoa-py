@@ -160,6 +160,26 @@ class Node:
         except Exception:
             pass
 
+    # ── image capture ──
+
+    def capture(self, *, rect=None, size=None, background=None):
+        """Render current content to an independent, in-memory ImageData.
+
+        For a Scene, rect defaults to its viewport in screen coordinates and
+        background defaults to the scene background. For another node, rect
+        is required in that node's local coordinates; ancestors and camera
+        are excluded, and the default background is transparent. Rectangles
+        are (x, y, width, height), with x rightward and y downward.
+
+        size specifies output pixels (width, height); by default, the rect is
+        rendered at the window's display scale. Call from a running scene's
+        setup, update or input callbacks, between GPU passes. Capture blocks
+        for readback, but never ticks animation, physics or input processing.
+        """
+        from ._capture import capture
+
+        return capture(self, rect=rect, size=size, background=background)
+
     # ── actions ──
 
     def run_action(self, act, key=None):
@@ -295,6 +315,7 @@ class Layer(Node):
         self._tex: Texture | None = None
         self._lsize = None
         self._lcenter = None
+        self._capture_center = None
         self._rscale = 1.0
         self._dirty = True
 
@@ -328,7 +349,8 @@ class Layer(Node):
             if self._tex is None or self._dirty or abs(rs - self._rscale) > 1e-3:
                 self._rebuild(renderer, rs)
             if self._tex and self._lsize and self._lcenter:
-                center = _apply(world, self._lcenter)
+                center = (self._capture_center if self._capture_center is not None
+                          else _apply(world, self._lcenter))
                 order[0] += 1
                 cmds.append(Cmd(
                     self.z, order[0], KIND_TEX,
@@ -340,6 +362,7 @@ class Layer(Node):
                 ))
 
     def _rebuild(self, renderer, rscale):
+        self._capture_center = None
         bounds = _measure_children(self.children)
         if bounds is None:
             if self._tex:
@@ -349,21 +372,65 @@ class Layer(Node):
             return
         x0, y0, x1, y1 = bounds
         pad = 6.0
-        lw = max(1.0, x1 - x0 + pad * 2)
-        lh = max(1.0, y1 - y0 + pad * 2)
-        pw = int(round(lw * renderer.screen_scale * rscale))
-        ph = int(round(lh * renderer.screen_scale * rscale))
+        x0, y0, x1, y1 = x0 - pad, y0 - pad, x1 + pad, y1 + pad
+        capture_viewport = renderer._capture_viewport
+        draw_transform = None
+        if capture_viewport is not None:
+            from ._capture import _inverse
+
+            # Rasterize only the visible part of a cached layer. A tiny crop
+            # at high magnification must not allocate its whole enlarged image.
+            cw, ch = capture_viewport
+            world = self._world_transform
+            draw_scale = _avg_scale(world)
+            if draw_scale == 0:
+                x1 = x0
+            else:
+                # Match the existing Layer quad: its center uses the full
+                # affine transform, while its extent uses average scale.
+                anchor = ((x0 + x1) * 0.5, (y0 + y1) * 0.5)
+                draw_transform = _mul(
+                    _matrix(_apply(world, anchor), _rot(world), draw_scale),
+                    _matrix((-anchor[0], -anchor[1]), 0, 1))
+                inverse = _inverse(draw_transform)
+                corners = [_apply(inverse, point) for point in ((0, 0), (cw, 0), (0, ch), (cw, ch))]
+                margin = 2 / (renderer.screen_scale * rscale)
+                x0 = max(x0, min(point[0] for point in corners) - margin)
+                y0 = max(y0, min(point[1] for point in corners) - margin)
+                x1 = min(x1, max(point[0] for point in corners) + margin)
+                y1 = min(y1, max(point[1] for point in corners) + margin)
+            if x1 <= x0 or y1 <= y0:
+                if self._tex:
+                    self._tex.close()
+                    self._tex = None
+                self._lsize = self._lcenter = None
+                self._rscale, self._dirty = rscale, False
+                return
+        lw = x1 - x0 if capture_viewport is not None else max(1.0, x1 - x0)
+        lh = y1 - y0 if capture_viewport is not None else max(1.0, y1 - y0)
+        pw = max(1, int(round(lw * renderer.screen_scale * rscale)))
+        ph = max(1, int(round(lh * renderer.screen_scale * rscale)))
         if self._tex is None or self._lsize != (lw, lh) or abs(self._rscale - rscale) > 1e-3:
             if self._tex: self._tex.close()
             self._tex = Texture.render_target(pw, ph)
-        local_root = _matrix((pad - x0, pad - y0), 0, 1)
+        local_root = _matrix((-x0, -y0), 0, 1)
         sub = []
         order = [0]
-        for child in self.children:
-            child._collect(sub, renderer, local_root, 1.0, order)
-        sub.sort(key=lambda c: (c.z, c.order))
-        renderer.render(sub, clear_color=(0, 0, 0, 0), target_texture=self._tex, viewport=(lw, lh))
+        previous_scale = renderer.screen_scale
+        try:
+            if capture_viewport is not None:
+                renderer._capture_viewport = (lw, lh)
+                renderer.screen_scale *= rscale
+            for child in self.children:
+                child._collect(sub, renderer, local_root, 1.0, order)
+            sub.sort(key=lambda c: (c.z, c.order))
+            renderer.render(sub, clear_color=(0, 0, 0, 0), target_texture=self._tex, viewport=(lw, lh))
+        finally:
+            renderer.screen_scale = previous_scale
+            renderer._capture_viewport = capture_viewport
         self._lcenter = ((x0 + x1) * 0.5, (y0 + y1) * 0.5)
+        if draw_transform is not None:
+            self._capture_center = _apply(draw_transform, self._lcenter)
         self._lsize = (lw, lh)
         self._rscale = rscale
         self._dirty = False
@@ -373,6 +440,7 @@ class Layer(Node):
             self._tex.close(); self._tex = None
         self._lsize = None
         self._lcenter = None
+        self._capture_center = None
         super().close()
 
 

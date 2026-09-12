@@ -350,6 +350,7 @@ class Renderer:
         self._ga: dict[tuple, GlyphAtlas | SDFGlyphAtlas] = {}
         self._sdf_base_size = 64  # base pixel size for SDF atlas
         self.screen_scale = window.scale
+        self._capture_viewport = None
         # Fallback pool for offscreen renders that happen outside a screen frame.
         self._buf_pool: list[tuple[int, Buffer]] = []   # (length, Buffer)
         self._buf_used: list[tuple[int, Buffer]] = []   # checked out this frame
@@ -586,17 +587,19 @@ class Renderer:
             frame.set_depth_stencil(compare="always", write=False)
 
     def render_packed(self, vertex_bytes, quad_bytes, count, batches, *, clear_color=None,
-                      mesh_vb=None, mesh_ib=None, mesh_batches=None, target_texture=None):
+                      mesh_vb=None, mesh_ib=None, mesh_batches=None, target_texture=None,
+                      viewport=None, pixel_scale=None, particle_transform=None):
         """Render pre-packed GPU data from C accelerator."""
         has_quads = count > 0
         has_meshes = mesh_vb is not None and mesh_batches and len(mesh_batches) > 0
+        has_particles = any(batch[0] == -2 for batch in batches)
         slot = self._begin_onscreen_slot() if target_texture is None else None
-        if not has_quads and not has_meshes:
+        if not has_quads and not has_meshes and not has_particles:
             with self._frame(clear_color or self.window.background, target_texture):
                 pass
             return
-        self.screen_scale = self.window.scale
-        res = self.window.size
+        self.screen_scale = self.window.scale if pixel_scale is None else pixel_scale
+        res = self.window.size if viewport is None else viewport
         if target_texture is not None:
             # Off-screen passes can be encoded back-to-back before the command
             # buffer executes, so each pass needs distinct buffers.
@@ -652,7 +655,9 @@ class Renderer:
                     )
                 elif start == -2:
                     # Particle batch: end_or_idx is the emitter object
-                    end_or_idx._render_particles(f, self, end_or_idx._world_opacity, msaa=use_msaa_pass)
+                    end_or_idx._render_particles(
+                        f, self, end_or_idx._world_opacity, msaa=use_msaa_pass,
+                        resolution=res, transform=particle_transform)
                     last_mode = None
                 else:
                     if last_mode != 'quad':
@@ -671,7 +676,8 @@ class Renderer:
             with self._frame(clear_color or self.window.background, target_texture):
                 pass
             return
-        self.screen_scale = self.window.scale
+        if target_texture is None:
+            self.screen_scale = self.window.scale
         if target_texture is not None:
             # Off-screen: use the active frame slot when called during scene render.
             vb = self._acquire(n * _VB)

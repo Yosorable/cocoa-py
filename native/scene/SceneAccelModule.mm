@@ -78,6 +78,7 @@ static PyObject *s_interactive, *s__bounds, *s__rendered_size;
 static PyObject *s__emit, *s__snap, *s_kind, *s_cx, *s_cy, *s_hw, *s_hh, *s_rot;
 static PyObject *s_params, *s_style, *s_extra;
 static PyObject *s__tex, *s__lsize, *s__lcenter, *s__dirty, *s__rscale, *s__shader_size;
+static PyObject *s__capture_center;
 static PyObject *s__path_size, *s__path_center, *s__path_version, *s__ensure_texture, *s__raster_dirty, *s__get_meshes;
 static PyObject *s__rebuild, *s_text_texture;
 static PyObject *s_parent;
@@ -114,6 +115,7 @@ static int intern_strings(void) {
     INTERN(s__path_version, "_path_version"); INTERN(s__ensure_texture, "_ensure_texture"); INTERN(s__get_meshes, "_get_meshes");
     INTERN(s__raster_dirty, "_raster_dirty");
     INTERN(s__lsize, "_lsize"); INTERN(s__lcenter, "_lcenter");
+    INTERN(s__capture_center, "_capture_center");
     INTERN(s__dirty, "_dirty"); INTERN(s__rscale, "_rscale"); INTERN(s__rebuild, "_rebuild");
     INTERN(s_text_texture, "text_texture"); INTERN(s_parent, "parent");
     INTERN(s_sprite_size, "sprite_size"); INTERN(s_anchor, "anchor");
@@ -221,6 +223,7 @@ typedef struct {
     unsigned long long fingerprint;
     double screen_scale;
     PyObject *renderer;
+    PyObject *render_error; /* owned exception from a Python rendering callback */
     InteractiveEntry *interactive;
     int interactive_count;
     int interactive_capacity;
@@ -899,6 +902,7 @@ static void state_init(CollectState *st, double screen_scale, PyObject *renderer
     st->fingerprint = 0xcbf29ce484222325ULL;
     st->screen_scale = screen_scale;
     st->renderer = renderer;
+    st->render_error = NULL;
     st->interactive_capacity = 64;
     st->interactive = (InteractiveEntry *)malloc(sizeof(InteractiveEntry) * st->interactive_capacity);
     st->interactive_count = 0;
@@ -926,6 +930,8 @@ static CCmd *state_append(CollectState *st) {
 }
 
 static void state_destroy(CollectState *st) {
+    Py_XDECREF(st->render_error);
+    st->render_error = NULL;
     free(st->cmds);
     st->cmds = NULL;
     free(st->interactive);
@@ -938,6 +944,13 @@ static void state_destroy(CollectState *st) {
     st->mesh_batches = NULL;
     free(st->particle_emitters);
     st->particle_emitters = NULL;
+}
+
+static bool state_take_render_error(CollectState *st) {
+    if (!PyErr_Occurred()) return false;
+    if (!st->render_error) st->render_error = PyErr_GetRaisedException();
+    else PyErr_Clear();
+    return true;
 }
 
 /* Append a direct mesh (screen-space vertices, 3 floats per vertex: x, y, alpha) to CollectState */
@@ -1369,8 +1382,15 @@ static void emit_label(PyObject *node, CNodeCache *cache, CollectState *st,
     PyObject *font_obj = PyObject_GetAttr(node, s_font);
     PyObject *color_obj = PyObject_GetAttr(node, s_color);
 
-    int pfs = (int)round(font_size * st->screen_scale);
-    if (pfs < 10) pfs = 10;
+    double requested_size = round(font_size * st->screen_scale);
+    if (!isfinite(requested_size) || requested_size > 16384) {
+        PyErr_SetString(PyExc_ValueError, "Label raster font size must be finite and at most 16384 pixels.");
+        state_take_render_error(st);
+        Py_XDECREF(text_obj); Py_XDECREF(font_obj); Py_XDECREF(color_obj);
+        cache->valid = 0;
+        return;
+    }
+    int pfs = (int)fmax(10, requested_size);
 
     int old_cmd_count = cache->cmd_count;
     cache->cmd_count = 0;
@@ -1402,6 +1422,12 @@ static void emit_label(PyObject *node, CNodeCache *cache, CollectState *st,
     PyObject *tex = PyObject_CallMethodObjArgs(st->renderer, s_text_texture,
                                                 text_obj, font_obj, pfs_obj, NULL);
     Py_XDECREF(pfs_obj);
+    if (!tex && state_take_render_error(st)) {
+        Py_XDECREF(text_obj); Py_XDECREF(font_obj); Py_XDECREF(color_obj);
+        cache->cmd_count = old_cmd_count;
+        cache->valid = 0;
+        return;
+    }
 
     if (tex && tex != Py_None) {
         PyObject *tsz = PyObject_GetAttr(tex, s_size);
@@ -1413,8 +1439,10 @@ static void emit_label(PyObject *node, CNodeCache *cache, CollectState *st,
         Py_XDECREF(tsz);
         if (PyErr_Occurred()) PyErr_Clear();
 
-        double dw = tw / st->screen_scale * s;
-        double dh = th / st->screen_scale * s;
+        /* A minimum raster font size must not enlarge the logical label. */
+        double raster_scale = font_size > 0 ? pfs / font_size : st->screen_scale;
+        double dw = tw / raster_scale * s;
+        double dh = th / raster_scale * s;
         /* Cache rendered size for accurate _bounds / _collider */
         PyObject *rsz = Py_BuildValue("(dd)", dw, dh);
         if (rsz) { PyObject_SetAttr(node, s__rendered_size, rsz); Py_DECREF(rsz); }
@@ -1879,7 +1907,7 @@ static void emit_path(PyObject *node, CNodeCache *cache, CollectState *st,
     }
     if (!mesh_list || mesh_list == Py_None || !PyList_Check(mesh_list) || PyList_GET_SIZE(mesh_list) == 0) {
         Py_XDECREF(mesh_list);
-        if (PyErr_Occurred()) PyErr_Clear();
+        state_take_render_error(st);
         cache->cmd_count = 0;
         cache->valid = 0;
         return;
@@ -2013,7 +2041,10 @@ static void handle_layer(PyObject *node, CNodeCache *cache, CollectState *st,
         PyObject *result = PyObject_CallMethodObjArgs(node, s__rebuild, st->renderer, rs_obj, NULL);
         Py_XDECREF(rs_obj);
         Py_XDECREF(result);
-        if (PyErr_Occurred()) PyErr_Clear();
+        if (state_take_render_error(st)) {
+            cache->valid = 0;
+            return;
+        }
     }
 
     /* Read texture info after potential rebuild */
@@ -2033,6 +2064,14 @@ static void handle_layer(PyObject *node, CNodeCache *cache, CollectState *st,
 
         double wcx, wcy;
         c_apply(world, lcx, lcy, &wcx, &wcy);
+        PyObject *capture_center = PyObject_GetAttr(node, s__capture_center);
+        if (capture_center && capture_center != Py_None &&
+            PyTuple_Check(capture_center) && PyTuple_GET_SIZE(capture_center) == 2) {
+            wcx = PyFloat_AsDouble(PyTuple_GET_ITEM(capture_center, 0));
+            wcy = PyFloat_AsDouble(PyTuple_GET_ITEM(capture_center, 1));
+        }
+        Py_XDECREF(capture_center);
+        if (PyErr_Occurred()) PyErr_Clear();
         float rot = (float)c_rot(world);
 
         CCmd *cmd = &cache->cmds[0];
@@ -2079,7 +2118,11 @@ static void handle_unknown_emit(PyObject *node, CNodeCache *cache, CollectState 
         py_cmds, st->renderer, world_tuple, py_op, py_order, NULL);
     Py_XDECREF(result);
     Py_XDECREF(py_op);
-    if (PyErr_Occurred()) PyErr_Clear();
+    if (state_take_render_error(st)) {
+        Py_DECREF(py_cmds); Py_DECREF(world_tuple); Py_DECREF(py_order);
+        cache->valid = 0;
+        return;
+    }
 
     /* Match Node._collect: cache the snapshot after _emit updates local state. */
     PyObject *snap = PyObject_CallMethodObjArgs(node, s__snap, NULL);
@@ -2178,6 +2221,7 @@ static void handle_unknown_emit(PyObject *node, CNodeCache *cache, CollectState 
 
 static void collect_recursive(PyObject *node, const double ptf[6], double pop,
                               CollectState *st) {
+    if (st->render_error) return;
     /* Visibility check */
     if (!read_bool(node, s_visible)) return;
     if (pop <= 0.001) return;
@@ -2275,7 +2319,7 @@ static void collect_recursive(PyObject *node, const double ptf[6], double pop,
             }
             if (hit) {
                 double fs = read_double(node, s_size);
-                int pfs = (int)round(fs * st->screen_scale);
+                double pfs = round(fs * st->screen_scale);
                 if (pfs < 10) pfs = 10;
                 double sh[2] = {fs, (double)pfs};
                 if (memcmp(sh, cache->shape, 2*sizeof(double)) != 0) hit = 0;
@@ -2548,13 +2592,14 @@ static void collect_recursive(PyObject *node, const double ptf[6], double pop,
                         Py_DECREF(world_tuple);
                         Py_DECREF(cmds_list);
                         Py_DECREF(py_order);
-                        if (PyErr_Occurred()) PyErr_Clear();
+                        state_take_render_error(st);
                     }
                 }
                 break;
             }
             case NTYPE_LAYER:
                 handle_layer(node, cache, st, world, wop);
+                if (st->render_error) return;
                 /* Append Layer cmds to state, then return (no child recursion) */
                 for (int i = 0; i < cache->cmd_count; i++) {
                     CCmd *dst = state_append(st);
@@ -2568,6 +2613,10 @@ static void collect_recursive(PyObject *node, const double ptf[6], double pop,
         }
 
         /* Append newly emitted cmds to state */
+        if (st->render_error) {
+            cache->valid = 0;
+            return;
+        }
         if (cache->dyn_cmds && cache->dyn_count > 0) {
             for (int i = 0; i < cache->dyn_count; i++) {
                 CCmd *dst = state_append(st);
@@ -2848,6 +2897,13 @@ static PyObject *accel_collect(PyObject *self, PyObject *args) {
     @autoreleasepool {
     state_init(&st, screen_scale, renderer, root);
     collect_recursive(root, tf, opacity, &st);
+    }
+    if (st.render_error) {
+        PyObject *error = st.render_error;
+        st.render_error = NULL;
+        state_destroy(&st);
+        PyErr_SetRaisedException(error);
+        return NULL;
     }
 
     /* Sort by (z, order) */

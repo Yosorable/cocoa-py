@@ -179,6 +179,21 @@ class Texture:
         r = _metal.create_image_texture(path=str(p))
         return cls(r["handle"], r["size"])
 
+    def to_image(self, window: Window, *, unpremultiply=True):
+        """Read this bgra8/rgba8 texture into an independent ImageData.
+
+        Call between GPU passes, using the window that rendered the texture.
+        Pending offscreen draws are submitted and readback waits for the GPU.
+        Scene rendering and loaded images use premultiplied alpha. Set
+        unpremultiply=False for custom textures that already use straight RGB.
+        """
+        from ._image_data import ImageData
+
+        if self._handle is None or window.handle is None:
+            raise RuntimeError("Image readback requires an open window and texture.")
+        return ImageData(*_metal.read_texture_image(
+            window=window.handle, texture=self._handle, unpremultiply=unpremultiply))
+
     @property
     def handle(self):
         return self._handle

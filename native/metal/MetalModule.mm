@@ -17,7 +17,9 @@ using CocoaColor = NSColor;
 #define CocoaFontWeightRegular NSFontWeightRegular
 #endif
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <mach/mach.h>
 #include <mutex>
 #include <string>
@@ -115,6 +117,19 @@ static NSUInteger bytesPerPixelForFormat(MTLPixelFormat fmt) {
         case MTLPixelFormatDepth32Float_Stencil8: return 5;
         default: return 4;
     }
+}
+
+static NSString *textureAllocationError(NSUInteger width, NSUInteger height, NSUInteger bytesPerPixel) {
+    constexpr NSUInteger maxDimension = 16384;
+    constexpr NSUInteger maxBytes = 256 * 1024 * 1024;
+    if (!width || !height || width > maxDimension || height > maxDimension) {
+        return @"Texture dimensions must be positive and at most 16384 per axis.";
+    }
+    if (!bytesPerPixel || width > maxBytes / bytesPerPixel ||
+        height > maxBytes / bytesPerPixel / width) {
+        return @"A texture allocation must not exceed 256 MiB.";
+    }
+    return nil;
 }
 
 static MTLPixelFormat depthFormatFromName(const char *name) {
@@ -716,6 +731,12 @@ static PyObject *metal_create_glyph_atlas(PyObject *self, PyObject *args, PyObje
             &fontName, &fontSize, &chars, &extraPadding, &sdfMode, &sdfSpread)) {
         return nullptr;
     }
+    if (!std::isfinite(fontSize) || fontSize <= 0 || fontSize > 16384 ||
+        !std::isfinite(extraPadding) || extraPadding > 16384 ||
+        !std::isfinite(sdfSpread) || sdfSpread < 0 || sdfSpread > 16384) {
+        PyErr_SetString(PyExc_ValueError, "Glyph raster dimensions must be finite and within texture limits.");
+        return nullptr;
+    }
     if (!ensureMetalContext()) {
         PyErr_SetString(PyExc_RuntimeError, "Metal device unavailable");
         return nullptr;
@@ -751,6 +772,7 @@ static PyObject *metal_create_glyph_atlas(PyObject *self, PyObject *args, PyObje
     __block id<MTLTexture> texture = nil;
     __block NSUInteger atlasW = 0, atlasH = 0;
     __block std::vector<PackedGlyph> packed;
+    __block NSString *allocationError = nil;
 
     NSString *nsFontName = fontName ? [NSString stringWithUTF8String:fontName] : nil;
     runOnMainSync(^{
@@ -793,6 +815,11 @@ static PyObject *metal_create_glyph_atlas(PyObject *self, PyObject *args, PyObje
 
             /* Shelf-packing: pack glyphs into rows */
             double maxW = 1024;
+            for (const auto &pg : packed) maxW = std::max(maxW, pg.gw + padding * 3);
+            if (!std::isfinite(maxW) || maxW > 16384) {
+                allocationError = @"Glyph atlas width exceeds the texture limit.";
+                return;
+            }
             double curX = padding, curY = padding, rowH = 0;
             for (auto &pg : packed) {
                 double slotW = pg.gw + padding * 2;
@@ -808,11 +835,18 @@ static PyObject *metal_create_glyph_atlas(PyObject *self, PyObject *args, PyObje
                 if (slotH > rowH) rowH = slotH;
             }
 
-            atlasW = (NSUInteger)maxW;
-            atlasH = (NSUInteger)MAX(64, ceil(curY + rowH + padding));
+            double measuredHeight = MAX(64, ceil(curY + rowH + padding));
+            if (!std::isfinite(measuredHeight) || measuredHeight > 16384) {
+                allocationError = @"Glyph atlas height exceeds the texture limit.";
+                return;
+            }
+            atlasW = (NSUInteger)ceil(maxW);
+            atlasH = (NSUInteger)measuredHeight;
             NSUInteger nextPow2 = 64;
             while (nextPow2 < atlasH) nextPow2 *= 2;
             atlasH = nextPow2;
+            allocationError = textureAllocationError(atlasW, atlasH, 4);
+            if (allocationError) return;
 
             /* Create bitmap and rasterize each glyph */
             size_t bytesPerRow = atlasW * 4;
@@ -948,6 +982,10 @@ static PyObject *metal_create_glyph_atlas(PyObject *self, PyObject *args, PyObje
 
     if (!texture) {
         Py_XDECREF(glyphDict);
+        if (allocationError) {
+            PyErr_SetString(PyExc_ValueError, allocationError.UTF8String);
+            return nullptr;
+        }
         PyErr_SetString(PyExc_RuntimeError, "Failed to create glyph atlas texture");
         return nullptr;
     }
@@ -993,6 +1031,12 @@ static PyObject *metal_create_render_texture(PyObject *self, PyObject *args, PyO
     }
 
     MTLPixelFormat fmt = pixelFormatFromName(format);
+    NSString *allocationError = textureAllocationError((NSUInteger)width, (NSUInteger)height,
+                                                      bytesPerPixelForFormat(fmt));
+    if (allocationError) {
+        PyErr_SetString(PyExc_ValueError, allocationError.UTF8String);
+        return nullptr;
+    }
     id<MTLTexture> texture;
     @autoreleasepool {
         MTLTextureDescriptor *descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:fmt
@@ -2382,7 +2426,12 @@ static PyObject *metal_resource_counts(PyObject *self, PyObject *args) {
     return dict;
 }
 
+#include "MetalImages.h"
+
 static PyMethodDef metalMethods[] = {
+    {"prepare_image_capture", metal_prepare_image_capture, METH_VARARGS, "Wait for preceding scene draws before image capture."},
+    {"read_texture_image", (PyCFunction)metal_read_texture_image, METH_VARARGS | METH_KEYWORDS, "Read an RGBA image after completing queued rendering."},
+    {"encode_png", metal_encode_png, METH_VARARGS, "Encode straight RGBA bytes as PNG."},
     {"create_window", (PyCFunction)metal_create_window, METH_VARARGS | METH_KEYWORDS, "Create a Metal-backed presentation window."},
     {"close_window", metal_close_window, METH_VARARGS, "Close a Metal presentation window."},
     {"window_metrics", metal_window_metrics, METH_VARARGS, "Return logical and pixel metrics for a window."},

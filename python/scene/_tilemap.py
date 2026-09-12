@@ -254,14 +254,17 @@ class TileMap(Node):
         hw_px = htw * sx
         hh_px = hth * sy
 
-        # Visible rect culling: get camera bounds in local space
-        scene_node = self
-        while scene_node.parent is not None:
-            scene_node = scene_node.parent
-        if hasattr(scene_node, '_window'):
-            sw, sh = scene_node._window.size
+        # Capture and nested layers can have a viewport larger than the window.
+        if renderer._capture_viewport is not None:
+            sw, sh = renderer._capture_viewport
         else:
-            sw, sh = 1024, 768
+            scene_node = self
+            while scene_node.parent is not None:
+                scene_node = scene_node.parent
+            if hasattr(scene_node, '_window'):
+                sw, sh = scene_node._window.size
+            else:
+                sw, sh = 1024, 768
 
         inv = _invert(world)
         corners = [_apply(inv, p) for p in ((0, 0), (sw, 0), (sw, sh), (0, sh))]

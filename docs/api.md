@@ -51,6 +51,12 @@ actions, hit testing, touch/mouse events and a physics world. `PhysicsBody`
 creates Box2D bodies. `scene.gpu` exposes Metal windows, buffers, textures,
 render/compute pipelines and blit operations for lower-level work.
 
+`Scene.capture()` and `Node.capture(rect=...)` return an owned `ImageData` with
+RGBA pixels, in-memory PNG encoding, PNG saving and optional NumPy/Pillow
+conversion. `gpu.Texture.to_image(window)` provides low-level image readback.
+See [scene capture and image export](scene-capture.md) for coordinates, alpha,
+resolution and lifetime rules, and a drawing/export example.
+
 macOS uses mouse input and resizable AppKit windows. iOS keeps UIKit touch input.
 Window orientation options select an initial desktop aspect ratio. Close windows
 and GPU resources explicitly, or use their supported context managers.

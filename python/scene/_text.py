@@ -67,11 +67,12 @@ class Label(Node):
     def _layout_bounds(self, renderer=None):
         if renderer is not None and self.text:
             try:
-                renderer.screen_scale = renderer.window.scale
-                scale = renderer.screen_scale
+                scale = (renderer.screen_scale if getattr(renderer, "_capturing", False)
+                         else renderer.window.scale)
                 pixel_size = max(10, int(round(self.size * scale)))
                 tex = renderer.text_texture(self.text, self.font, pixel_size)
-                self._rendered_size = (tex.size[0] / scale, tex.size[1] / scale)
+                raster_scale = pixel_size / self.size if self.size > 0 else scale
+                self._rendered_size = (tex.size[0] / raster_scale, tex.size[1] / raster_scale)
             except Exception:
                 pass
         return self._bounds()
@@ -90,8 +91,9 @@ class Label(Node):
         s = max(_avg_scale(world), 0.001)
         base_pfs = max(10, int(round(self.size * renderer.screen_scale)))
         tex = renderer.text_texture(self.text, self.font, base_pfs)
-        dw = tex.size[0] / renderer.screen_scale * s
-        dh = tex.size[1] / renderer.screen_scale * s
+        raster_scale = base_pfs / self.size if self.size > 0 else renderer.screen_scale
+        dw = tex.size[0] / raster_scale * s
+        dh = tex.size[1] / raster_scale * s
         self._rendered_size = (dw, dh)
         center = _apply(world, (0, 0))
         c = _color(self.color)
