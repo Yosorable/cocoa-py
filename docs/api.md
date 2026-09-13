@@ -161,12 +161,23 @@ for freshness, orientation, permissions and cleanup.
 `available()` reports support for `accelerometer`, `gyroscope`, `magnetometer`
 and fused `device` motion. `watch(sensor="device", interval=1/60, capacity=128)`
 returns a context-managed stream with the same read/stats/close contract as
-location. The minimum interval is 0.01 seconds; device delivery is best effort.
+location. Intervals range from 0.01 through 1 second; device delivery is best
+effort. Multiple watches share one native manager, with independent bounded
+buffers and delivery intervals. Closing one watch does not stop other watches.
 
 Samples are dictionaries. Acceleration and gravity use m/s², rotation uses rad/s,
 magnetic fields use microteslas, attitude angles use radians, and timestamps use
-seconds since system boot. Device motion also provides an orientation quaternion.
+seconds since system boot. Device motion also provides an orientation quaternion,
+`reference_frame`, optional calibrated `magnetic_field`, and `magnetic_accuracy`.
+Raw accelerometer readings include gravity; device-motion `acceleration` excludes it.
+
+`reference_frames()` lists supported device-motion frames: `arbitrary`,
+`arbitrary_corrected`, `magnetic_north`, and `true_north`. Select a frame with
+`watch(reference_frame=...)`; the default is `arbitrary`. Simultaneous device
+watches must use the same frame; conflicting requests raise `ValueError`.
+Frame availability does not guarantee calibration or a usable true-north fix.
 Native macOS raises `NotImplementedError` when starting phone sensors.
+See [motion streams](motion.md) for sample fields, axes, timing, and cleanup.
 
 ## Clipboard
 
