@@ -8,13 +8,13 @@ One distribution provides independent top-level imports:
 | Module | Capabilities |
 | --- | --- |
 | `audio` | File and PCM playback, streaming recording, effects, rate/pitch control, offline mixing and WAV/CAF/M4A export. |
-| `scene` | Metal-rendered 2D scenes, shapes, sprites, text, animation, input and Box2D physics. |
+| `scene` | Metal-rendered 2D scenes, shapes, sprites, text, animation, controls, text editing, image capture and Box2D physics. |
 | `coreml` | Core ML model compilation, inspection and NumPy-based inference. |
 | `photos` | System media picker and saving images/videos to Photos. |
-| `location` | Foreground location fixes, bounded update streams and address geocoding. |
-| `motion` | Bounded iOS accelerometer, gyroscope, magnetometer and device-motion streams. |
+| `location` | Foreground location fixes, compass readings, bounded update streams and address geocoding. |
+| `motion` | Shared iOS motion sensors with independent bounded streams and attitude reference frames. |
 | `clipboard` | Text, URLs, images, multiple representations and clipboard state queries. |
-| `share` | System sharing UI for text, URLs and files. |
+| `share` | System sharing UI for text, URLs, files, images and in-memory attachments. |
 | `device` | OS, hardware, power, battery and storage information. |
 | `notification` | Permission, scheduling and management of local notifications. |
 
@@ -25,9 +25,9 @@ Rubicon-ObjC is not a dependency.
 
 ## Status and installation
 
-**0.1.0a3** is an alpha release of the module collection described above.
+**0.1.0a4** is an alpha release of the module collection described above.
 It provides Apple Silicon macOS and arm64 iPhoneOS wheels on
-[PyPI](https://pypi.org/project/cocoa-py/0.1.0a3/), plus a source distribution.
+[PyPI](https://pypi.org/project/cocoa-py/0.1.0a4/), plus a source distribution.
 The earlier **0.1.0a1** preview contained only Core ML.
 
 The current source targets **macOS 14+**, **iOS 17+**, and standard **CPython 3.14
@@ -40,10 +40,10 @@ On an Apple Silicon Mac, install the wheel in a CPython 3.14 environment:
 ```sh
 python3.14 -m venv .venv
 source .venv/bin/activate
-python -m pip install 'cocoa-py[coreml]==0.1.0a3'
+python -m pip install 'cocoa-py[coreml]==0.1.0a4'
 ```
 
-The `coreml` extra installs NumPy for inference. Use `cocoa-py==0.1.0a3` without
+The `coreml` extra installs NumPy for inference. Use `cocoa-py==0.1.0a4` without
 the extra if you do not need NumPy. Installing a matching wheel does not require
 Xcode. Source builds require Apple's development tools and use NumPy headers in
 an isolated build environment.
@@ -97,6 +97,7 @@ and lifecycle integration; see [iOS embedding](https://github.com/Yosorable/coco
 - [Embedding in an iOS application](https://github.com/Yosorable/cocoa-py/blob/main/docs/embedding.md)
 - [Architecture and resource ownership](https://github.com/Yosorable/cocoa-py/blob/main/docs/architecture.md)
 - [Third-party code](https://github.com/Yosorable/cocoa-py/blob/main/docs/third-party.md)
+- [0.1.0a4 system modules and scene UI](https://github.com/Yosorable/cocoa-py/blob/main/docs/releases/0.1.0a4.md)
 - [0.1.0a3 scene cache fix](https://github.com/Yosorable/cocoa-py/blob/main/docs/releases/0.1.0a3.md)
 - [0.1.0a2 module collection](https://github.com/Yosorable/cocoa-py/blob/main/docs/releases/0.1.0a2.md)
 - [Initial Core ML release](https://github.com/Yosorable/cocoa-py/blob/main/docs/releases/0.1.0a1.md)
@@ -125,13 +126,13 @@ To produce an iOS wheel with a CPython 3.14 framework for arm64 devices:
 
 ```sh
 python3.14 tools/build_ios_wheel.py --python-framework /path/to/ios-arm64/Python.framework
-COCOA_PY_IOS_WHEEL=dist/cocoa_py-0.1.0a3-cp314-cp314-ios_17_0_arm64_iphoneos.whl \
+COCOA_PY_IOS_WHEEL=dist/cocoa_py-0.1.0a4-cp314-cp314-ios_17_0_arm64_iphoneos.whl \
   python3.14 -m unittest discover -s tests -p test_ios_wheel.py -v
 ```
 
 This compiles all seven extensions and the scene shader library. It does not
 build or run a simulator. The iOS wheel excludes the macOS launcher. Published
-versions correspond to Git tags such as `v0.1.0a3`; hosts should pin the release
+versions correspond to Git tags such as `v0.1.0a4`; hosts should pin the release
 version and record the downloaded wheel's SHA-256.
 
 ## License

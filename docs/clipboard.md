@@ -4,8 +4,8 @@ Import `clipboard` directly on iOS or macOS. Importing it does not read the
 clipboard, request permission, import Pillow, or initialize other cocoa-py
 modules. Clipboard functions run their native work on the main thread.
 
-These APIs are available in the development source; the published 0.1.0a3
-release contains the earlier text and typed-byte API.
+These APIs are available in `0.1.0a4` and later. The earlier `0.1.0a3` release
+contains the original text and typed-byte API.
 
 ## Text and URLs
 
@@ -85,8 +85,8 @@ if png is not None:
 ```
 
 `read_image()` returns a detached Pillow image, or `None` when no image is
-available. Install Pillow separately, or install `cocoa-py[images]` from a
-release containing these APIs. Pillow is loaded only for Pillow conversion.
+available. Install Pillow separately, or install `cocoa-py[images]>=0.1.0a4`.
+Pillow is loaded only for Pillow conversion.
 `read_image(as_bytes=True)` returns PNG bytes, and `write_image(encoded_buffer)`
 accepts OS-decodable image data, both without Pillow. File paths are not accepted.
 

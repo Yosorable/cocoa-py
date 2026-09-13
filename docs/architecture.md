@@ -38,7 +38,7 @@ these binaries in a directory does not combine their engine state or dependencie
 Python handles composition, typed results, timeout policy and blocking PCM
 backpressure. Native code validates input and owns Apple framework resources.
 Delegate and render callbacks do not call Python. Asynchronous system services
-return serializable snapshots to a Python polling loop that releases the GIL
+return serializable snapshots to a Python wait loop that releases the GIL
 while waiting and checks interrupts between bounded waits. Clipboard calls use
 a synchronous typed bridge in the same extension: buffers become owned native
 data before releasing the GIL, and results become Python bytes after reacquiring
@@ -52,10 +52,13 @@ loop while waiting. A sample's pending wake is retired when its queue becomes
 empty, under the same lock as the producer's notification. Waiting for completion
 does not treat unread stream samples as a completed operation.
 
-Each system request owns its manager or controller. Sensor streams have bounded
-queues and discard their oldest samples on overflow, with an observable counter.
-A context manager or `close()` stops the producer; capsule destruction also
-arranges native cleanup without blocking a Python finalizer on the UI thread.
+Each system request owns its resources or a subscription to a shared resource.
+Motion streams share one native manager and the sampling source for each sensor,
+while retaining independent bounded queues. Sensor streams discard their oldest
+samples on overflow, with an observable counter. A context manager or `close()`
+ends the request's subscription; a shared motion source stops after its final
+subscriber closes. Capsule destruction also arranges native cleanup without
+blocking a Python finalizer on the UI thread.
 
 Playback and recording resources keep their existing explicit lifecycle APIs.
 Active one-shot audio playback can outlive an unreferenced Python Channel until

@@ -1,8 +1,7 @@
 # Local notifications
 
-The expanded API described here is in the development source and local preview
-wheels. It has not been published to PyPI yet; `0.1.0a3` has the original interval
-scheduling API. Use a development build to try the additions below.
+The expanded API described here is available in `0.1.0a4` and later.
+The earlier `0.1.0a3` release provides the original interval scheduling API.
 
 The top-level `notification` module uses Apple's UserNotifications framework on
 iOS and macOS. These are local reminders managed by the operating system; no
