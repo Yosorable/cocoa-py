@@ -86,9 +86,16 @@ static UIButton *inputKeyboardButton(NSString *symbol, id target, SEL action) {
 }
 @end
 
+@implementation CocoaPyInputHost
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    return !self.inputOwner.headless && [self.inputOwner containsClipPoint:point] && [super pointInside:point withEvent:event];
+}
+@end
+
 @implementation CocoaPySceneTextInput (Platform)
 - (void)buildEditor {
-    self.host = [[UIView alloc] initWithFrame:CGRectZero];
+    self.host = [[CocoaPyInputHost alloc] initWithFrame:CGRectZero];
+    self.host.inputOwner = self;
     self.host.clipsToBounds = YES;
     self.host.hidden = YES;
     self.host.userInteractionEnabled = !self.headless;
@@ -298,7 +305,7 @@ static UIButton *inputKeyboardButton(NSString *symbol, id target, SEL action) {
 - (void)applyPlacement {
     CGFloat width = [self.options[@"width"] doubleValue], height = [self.options[@"height"] doubleValue];
     CGAffineTransform t = self.placement;
-    BOOL avoiding = !self.headless && (self.focused || self.activating) && [self.options[@"avoid_keyboard"] boolValue] && !CGRectIsNull(self.keyboardFrame);
+    BOOL avoiding = !self.headless && !self.sceneManagedPlacement && (self.focused || self.activating) && [self.options[@"avoid_keyboard"] boolValue] && !CGRectIsNull(self.keyboardFrame);
     CGRect original = CGRectApplyAffineTransform(CGRectMake(-width / 2, -height / 2, width, height), t);
     avoiding = avoiding && CGRectIntersectsRect(original, self.keyboardFrame);
     if (avoiding && self.textView && fabs(t.b) < 1e-6 && fabs(t.c) < 1e-6 && fabs(t.d) > 1e-6) {
@@ -326,6 +333,7 @@ static UIButton *inputKeyboardButton(NSString *symbol, id target, SEL action) {
     }
     self.host.alpha = self.headless ? 0 : self.opacity;
     self.host.hidden = !self.shown || !(self.focused || self.activating);
+    [self applyClips];
 }
 - (void)keyboardChanged:(NSNotification *)notification {
     if (!self.surface.window.isKeyWindow || [notification.name isEqualToString:UIKeyboardWillHideNotification]) {
@@ -339,10 +347,9 @@ static UIButton *inputKeyboardButton(NSString *symbol, id target, SEL action) {
     }
     if (!gInputKeyboardFrames) gInputKeyboardFrames = [NSMutableDictionary new];
     gInputKeyboardFrames[@(self.windowHandle)] = [NSValue valueWithCGRect:self.keyboardFrame];
-    NSTimeInterval duration = [notification.userInfo[UIKeyboardAnimationDurationUserInfoKey] doubleValue];
-    UIViewAnimationOptions options = (UIViewAnimationOptions)([notification.userInfo[UIKeyboardAnimationCurveUserInfoKey] integerValue] << 16);
-    [UIView animateWithDuration:duration delay:0 options:options | UIViewAnimationOptionBeginFromCurrentState
-                     animations:^{ [self applyPlacement]; } completion:nil];
+    // Automatic avoidance updates geometry immediately, for both standalone
+    // editors and scroll-managed editors. UIKit owns the keyboard's animation.
+    [UIView performWithoutAnimation:^{ [self applyPlacement]; }];
 }
 
 - (void)fieldChanged:(id)sender { [self changed]; }

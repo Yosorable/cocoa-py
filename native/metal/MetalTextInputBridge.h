@@ -336,11 +336,27 @@ static PyObject *metal_text_input_frame(PyObject *, PyObject *args) {
     long long handle;
     PyObject *matrix;
     double opacity;
-    int visible;
-    if (!PyArg_ParseTuple(args, "LOdp", &handle, &matrix, &opacity, &visible)) return nullptr;
+    int visible, sceneManaged = 0;
+    PyObject *clipValues = Py_None;
+    if (!PyArg_ParseTuple(args, "LOdp|Op", &handle, &matrix, &opacity, &visible, &clipValues, &sceneManaged)) return nullptr;
     @autoreleasepool {
         NSArray *values = inputNumbers(matrix, 6);
         if (!values) return nullptr;
+        NSMutableArray *clips = [NSMutableArray new];
+        if (clipValues != Py_None) {
+            PyObject *regions = PySequence_Tuple(clipValues);
+            if (!regions) return nullptr;
+            for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(regions); ++i) {
+                NSArray *region = inputNumbers(PyTuple_GET_ITEM(regions, i), 11);
+                if (!region) break;
+                if ([region[8] doubleValue] < 0 || [region[9] doubleValue] < 0 || [region[10] doubleValue] < 0) {
+                    PyErr_SetString(PyExc_ValueError, "Clip dimensions must be non-negative."); break;
+                }
+                [clips addObject:region];
+            }
+            Py_DECREF(regions);
+            if (PyErr_Occurred()) return nullptr;
+        }
         if (!std::isfinite(opacity) || opacity < 0 || opacity > 1) {
             PyErr_SetString(PyExc_ValueError, "Opacity must be finite and in 0..1."); return nullptr;
         }
@@ -355,10 +371,20 @@ static PyObject *metal_text_input_frame(PyObject *, PyObject *args) {
                 invalid = true; return nil;
             }
             input.placement = t;
+            input.sceneManagedPlacement = sceneManaged;
             input.opacity = opacity;
+            input.clipRegions = clips;
             input.shown = visible && opacity > 0.001 && std::isfinite(t.a * t.d - t.b * t.c) && t.a * t.d != t.b * t.c;
             if (!input.shown) [input endEditing];
+            #if COCOA_PY_UIKIT
+            if (sceneManaged) {
+                for (NSString *key in @[@"position", @"bounds", @"transform"])
+                    [input.host.layer removeAnimationForKey:key];
+                [UIView performWithoutAnimation:^{ [input applyPlacement]; }];
+            } else [input applyPlacement];
+            #else
             [input applyPlacement];
+            #endif
             return nil;
         });
         if (invalid) {
@@ -422,15 +448,14 @@ static PyObject *metal_text_input_close(PyObject *, PyObject *args) {
 static PyObject *metal_text_input_keyboard(PyObject *, PyObject *args) {
     long long window;
     if (!PyArg_ParseTuple(args, "L", &window)) return nullptr;
-#if COCOA_PY_UIKIT
     __block CGRect frame = CGRectNull;
+#if COCOA_PY_UIKIT
     runOnMainSync(^{
-        for (CocoaPySceneTextInput *input in gTextInputs.allValues) {
-            if (input.windowHandle == window && input.focused) { frame = input.keyboardFrame; break; }
-        }
+        NSValue *stored = gInputKeyboardFrames[@(window)];
+        if (stored) frame = stored.CGRectValue;
     });
+#endif
     if (!CGRectIsNull(frame) && !CGRectIsEmpty(frame))
         return Py_BuildValue("(dddd)", frame.origin.x, frame.origin.y, frame.size.width, frame.size.height);
-#endif
     Py_RETURN_NONE;
 }

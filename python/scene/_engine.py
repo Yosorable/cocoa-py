@@ -33,6 +33,10 @@ class Cmd:
     texture: Texture | None
     _vb: bytes | None = None
     _qb: bytes | None = None
+    _clips: tuple | None = None
+    _emitter: object = None
+    _render_layer: int | None = None
+    _sort_scope: tuple | None = None
 
 _VTX = struct.Struct("<4f")
 _QD  = struct.Struct("<16f")
@@ -45,6 +49,15 @@ _QB  = 64   # 16 * 4
 _TEXT_LIMIT = 256
 _FRAME_SLOTS = 3
 _ATLAS_INITIAL_CHARS = ''.join(chr(c) for c in range(32, 127))
+
+
+class _TextTexture(Texture):
+    __slots__ = ("logical_size", "draw_size", "line_count", "truncated")
+
+    def __init__(self, result):
+        super().__init__(result["handle"], result["size"])
+        for name in self.__slots__:
+            setattr(self, name, result[name])
 
 
 @dataclass(slots=True)
@@ -351,6 +364,7 @@ class Renderer:
         self._sdf_base_size = 64  # base pixel size for SDF atlas
         self.screen_scale = window.scale
         self._capture_viewport = None
+        self._clipped_pipelines = {}
         # Fallback pool for offscreen renders that happen outside a screen frame.
         self._buf_pool: list[tuple[int, Buffer]] = []   # (length, Buffer)
         self._buf_used: list[tuple[int, Buffer]] = []   # checked out this frame
@@ -437,8 +451,22 @@ class Renderer:
             slot.pool = used
             slot.used = []
 
-    def text_texture(self, text, font_name, pixel_size):
+    def text_texture(self, text, font_name, pixel_size, *, layout=None):
         """Render text using bitmap glyph atlas (CoreText native rasterization)."""
+        if layout is not None:
+            from _cocoa import _metal
+            key = ("paragraph", text, font_name, pixel_size, layout)
+            texture = self._tc.get(key)
+            if texture is None:
+                size, width, alignment, spacing, lines, overflow, wrap = layout
+                result = _metal.text_layout(text, size, font_name, width, alignment,
+                                            spacing, lines, overflow, wrap,
+                                            pixel_size / size, True)
+                texture = self._tc[key] = _TextTexture(result)
+                self._trim_text_cache()
+            else:
+                self._tc.move_to_end(key)
+            return texture
         key = (text, font_name, pixel_size)
         t = self._tc.get(key)
         if t is not None:
@@ -481,72 +509,42 @@ class Renderer:
             self._tc.popitem(last=False)
 
 
-    def _encode(self, cmds, n, vb, qb, ub, clear_color, target_texture, viewport):
-        # Pack quads, skipping KIND_PARTICLE markers
-        quad_cmds = [c for c in cmds if c.kind != KIND_PARTICLE]
-        qn = len(quad_cmds)
-        # Remap indices: original cmd index → packed quad index
-        quad_idx = {}
-        for qi, c in enumerate(quad_cmds):
-            quad_idx[id(c)] = qi
-        if qn > 0:
-            vd = bytearray(qn * _VB)
-            qd = bytearray(qn * _QB)
-            for i, c in enumerate(quad_cmds):
-                v = c._vb
-                if v is None:
-                    v = _quad_verts(c); c._vb = v
-                vd[i*_VB:(i+1)*_VB] = v
-                q = c._qb
-                if q is None:
-                    q = _quad_data(c); c._qb = q
-                qd[i*_QB:(i+1)*_QB] = q
-            vb.write(vd)
-            qb.write(qd)
-        res = viewport or self.window.size
-        ub.write(_UNI.pack(res[0], res[1], self.screen_scale, 0))
-
-        # Build unified batch list (quad batches + particle entries)
-        batches = []  # (start, end, is_tex, tex_handle) or (-2, emitter)
-        bs, pk = -1, None
-        for c in cmds:
-            if c.kind == KIND_PARTICLE:
-                # Flush pending quad batch
-                if bs >= 0 and pk is not None:
-                    batches.append((bs, quad_idx[id(c)] if id(c) in quad_idx else (qi + 1), pk))
-                    bs, pk = -1, None
-                batches.append((-2, c._emitter))
+    def _scene_pipeline(self, name, clipped=False):
+        if not clipped:
+            return getattr(self, "_" + name)
+        pipeline = self._clipped_pipelines.get(name)
+        if pipeline is None:
+            multisample = name.endswith("_ms")
+            base = name.removesuffix("_ms")
+            if base.startswith("pp"):
+                vertex = "particle_vs"
+                fragment = "particle_tex_fs" if base == "pp_tex" else "particle_fs"
+            elif base in ("vp", "vpn", "vs"):
+                vertex, fragment = "vector_vertex", "vector_frag"
             else:
-                qi_c = quad_idx[id(c)]
-                k = (c.kind == KIND_TEX, c.texture.handle if c.texture else 0)
-                if bs < 0:
-                    bs = qi_c; pk = k
-                elif k != pk:
-                    batches.append((bs, qi_c, pk))
-                    bs, pk = qi_c, k
-        if bs >= 0 and pk is not None:
-            batches.append((bs, qn, pk))
+                vertex = "quad_vertex"
+                fragment = "tex_frag" if base == "tp" else "shape_frag"
+            pipeline = Pipeline(
+                self._lib, vertex=vertex, fragment=fragment + "_clipped",
+                premultiplied=True, blending=base not in ("vpn", "vs"),
+                sample_count=self._msaa if multisample else 1,
+                stencil_format="stencil8" if multisample else None,
+                color_write=base != "vs")
+            self._clipped_pipelines[name] = pipeline
+        return pipeline
 
-        cc = clear_color or self.window.background
-        with self._frame(cc, target_texture) as f:
-            f.set_vertex_buffer(vb, 0)
-            f.set_vertex_buffer(ub, 1)
-            f.set_fragment_buffer(qb, 0)
-            cp = None
-            for batch in batches:
-                if batch[0] == -2:
-                    emitter = batch[1]
-                    emitter._render_particles(f, self, emitter._world_opacity)
-                    cp = None
-                else:
-                    s, e, (is_tex, _) = batch
-                    p = self._tp if is_tex else self._sp
-                    if p is not cp: f.set_pipeline(p); cp = p
-                    if is_tex: f.set_fragment_texture(quad_cmds[s].texture, 0)
-                    f.draw("triangle", s * _VPQ, (e - s) * _VPQ)
+    def _clip_buffers(self, clips, resolution, target, slot):
+        if not clips:
+            return None
+        vertices = self._acquire(len(clips) * 48, slot=slot)
+        vertices.write(b"".join(struct.pack("<12f", *region, 0) for region in clips))
+        info = self._acquire(16, slot=slot)
+        pixels = target.size if target is not None else tuple(v * self.window.scale for v in resolution)
+        info.write(struct.pack("<IffI", len(clips), pixels[0] / resolution[0], pixels[1] / resolution[1], 0))
+        return vertices, info
 
     def _draw_mesh(self, frame, index_buffer, index_count, index_type, *,
-                   color, blend, is_stroke, fill_rule, offset=0, slot=None):
+                   color, blend, is_stroke, fill_rule, offset=0, slot=None, clipped=False):
         cb = self._acquire(_VEC_COL.size, slot=slot)
         cb.write(_VEC_COL.pack(*color))
         masked = fill_rule is not None or (is_stroke and color[3] < 1.0)
@@ -566,7 +564,7 @@ class Renderer:
                 stencil_pass=stencil_pass, stencil_back_pass=back_pass,
                 stencil_ref=reference,
             )
-            frame.set_pipeline(self._vs_ms)
+            frame.set_pipeline(self._scene_pipeline("vs_ms", clipped))
             frame.set_fragment_buffer(cb, 0)
             frame.draw_indexed("triangle", index_buffer, index_count,
                                index_type=index_type, offset=offset)
@@ -577,9 +575,9 @@ class Renderer:
                 stencil_compare="not_equal" if fill_rule is not None else "equal",
                 stencil_pass="zero", stencil_ref=reference,
             )
-            frame.set_pipeline(self._vp_ms)
+            frame.set_pipeline(self._scene_pipeline("vp_ms", clipped))
         else:
-            frame.set_pipeline(self._vp_ms if blend or is_stroke else self._vpn_ms)
+            frame.set_pipeline(self._scene_pipeline("vp_ms" if blend or is_stroke else "vpn_ms", clipped))
         frame.set_fragment_buffer(cb, 0)
         frame.draw_indexed("triangle", index_buffer, index_count,
                            index_type=index_type, offset=offset)
@@ -631,8 +629,9 @@ class Renderer:
         it = {0: "uint16", 1: "uint32"}
         last_mode = None  # 'quad' or 'mesh' — track to rebind buffers on switch
         use_msaa_pass = has_meshes
-        quad_shape_pipeline = self._sp_ms if use_msaa_pass else self._sp
-        quad_tex_pipeline = self._tp_ms if use_msaa_pass else self._tp
+        contexts = dict.fromkeys(clips for start, clips, _, _ in batches if start == -3)
+        clip_buffers = {clips: self._clip_buffers(clips, res, target_texture, slot) for clips in contexts}
+        clipped = False
         with self._frame(
             cc,
             target_texture,
@@ -640,7 +639,13 @@ class Renderer:
             stencil=use_msaa_pass,
         ) as f:
             for start, end_or_idx, is_tex, tex in batches:
-                if start == -1:
+                if start == -3:
+                    buffers = clip_buffers[end_or_idx]
+                    clipped = bool(buffers)
+                    if buffers:
+                        f.set_fragment_buffer(buffers[0], 1)
+                        f.set_fragment_buffer(buffers[1], 2)
+                elif start == -1:
                     # Mesh batch (end_or_idx = mesh_batch_idx)
                     mb = mesh_batches[end_or_idx]
                     idx_offset, idx_count, idx_is_32, color, blend, is_stroke, fill_rule = mb
@@ -651,13 +656,13 @@ class Renderer:
                     self._draw_mesh(
                         f, mib, idx_count, it[idx_is_32], offset=idx_offset,
                         color=color, blend=blend, is_stroke=is_stroke,
-                        fill_rule=fill_rule, slot=slot,
+                        fill_rule=fill_rule, slot=slot, clipped=clipped,
                     )
                 elif start == -2:
                     # Particle batch: end_or_idx is the emitter object
                     end_or_idx._render_particles(
                         f, self, end_or_idx._world_opacity, msaa=use_msaa_pass,
-                        resolution=res, transform=particle_transform)
+                        resolution=res, transform=particle_transform, clipped=clipped)
                     last_mode = None
                 else:
                     if last_mode != 'quad':
@@ -665,34 +670,55 @@ class Renderer:
                         f.set_vertex_buffer(ub, 1)
                         f.set_fragment_buffer(qb, 0)
                         last_mode = 'quad'
-                    p = quad_tex_pipeline if is_tex else quad_shape_pipeline
+                    p = self._scene_pipeline(("tp" if is_tex else "sp") + ("_ms" if use_msaa_pass else ""), clipped)
                     f.set_pipeline(p)
                     if is_tex and tex is not None: f.set_fragment_texture(tex, 0)
                     f.draw("triangle", start * _VPQ, (end_or_idx - start) * _VPQ)
 
     def render(self, cmds, *, clear_color=None, target_texture=None, viewport=None):
-        n = len(cmds)
-        if n == 0:
-            with self._frame(clear_color or self.window.background, target_texture):
-                pass
-            return
-        if target_texture is None:
-            self.screen_scale = self.window.scale
-        if target_texture is not None:
-            # Off-screen: use the active frame slot when called during scene render.
-            vb = self._acquire(n * _VB)
-            qb = self._acquire(n * _QB)
-            ub = self._acquire(256)
-            self._encode(cmds, n, vb, qb, ub, clear_color, target_texture, viewport)
-        else:
-            slot = self._begin_onscreen_slot()
-            if n > slot.vc:
-                slot.vb.close(); slot.vc = n * 2; slot.vb = Buffer(slot.vc * _VB)
-            if n > slot.qc:
-                slot.qb.close(); slot.qc = n * 2; slot.qb = Buffer(slot.qc * _QB)
-            self._encode(cmds, n, slot.vb, slot.qb, slot.ub, clear_color, None, None)
+        # Use the same batch protocol for Python collection and native collect.
+        vertices, quads, batches = bytearray(), bytearray(), []
+        count, start = 0, 0
+        pending = None
+        active_clips = None
+
+        def flush():
+            nonlocal pending
+            if pending is not None:
+                batches.append((start, count, *pending))
+                pending = None
+
+        for cmd in cmds:
+            clips = cmd._clips or ()
+            if clips != active_clips:
+                flush()
+                batches.append((-3, clips, False, None))
+                active_clips = clips
+            if cmd.kind == KIND_PARTICLE:
+                flush()
+                batches.append((-2, cmd._emitter, False, None))
+                continue
+            key = (cmd.kind == KIND_TEX, cmd.texture)
+            if pending != key:
+                flush()
+                pending, start = key, count
+            if cmd._vb is None:
+                cmd._vb = _quad_verts(cmd)
+            if cmd._qb is None:
+                cmd._qb = _quad_data(cmd)
+            vertices.extend(cmd._vb)
+            quads.extend(cmd._qb)
+            count += 1
+        flush()
+        self.render_packed(bytes(vertices), bytes(quads), count, batches,
+                           clear_color=clear_color, target_texture=target_texture,
+                           viewport=viewport,
+                           pixel_scale=self.screen_scale if target_texture is not None else None)
 
     def close(self):
+        for pipeline in self._clipped_pipelines.values():
+            pipeline.close()
+        self._clipped_pipelines.clear()
         for t in self._tc.values():
             try: t.close()
             except Exception: pass

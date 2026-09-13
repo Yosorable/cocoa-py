@@ -2,45 +2,70 @@
 from __future__ import annotations
 
 import math
+import operator
+import struct
 
 from ._common import _apply, _avg_scale, _color, _rot
 from ._engine import Cmd, KIND_TEX
-from ._node import Node
+from ._node import Layer, Node
 
 
 class Label(Node):
-    def __init__(self, text="", *, size=18, color="#ffffff", font=None, **kw):
+    """Shaped text with optional paragraph layout, in local point coordinates.
+
+    max_width fixes the paragraph box width; None measures the longest explicit
+    line. line_spacing adds space between lines. max_lines limits visible lines;
+    overflow selects clipping or an ellipsis on the final visible line. Empty
+    text has one line of metrics and no ink. measure() does not open a window.
+    """
+
+    def __init__(self, text="", *, size=18, color="#ffffff", font=None,
+                 max_width=None, alignment="left", line_spacing=0,
+                 max_lines=None, overflow="clip", wrap="word", **kw):
         super().__init__(**kw)
-        self._text = ""
-        self._size = 18.0
-        self._font = None
-        self._rendered_size = None
-        self.text = str(text)
-        self.size = float(size)
-        self.color = color
-        self.font = font
+        self._measurement = self._rendered_size = None
+        self.text, self.size, self.color, self.font = text, size, color, font
+        self.max_width, self.alignment, self.line_spacing = max_width, alignment, line_spacing
+        self.max_lines, self.overflow, self.wrap = max_lines, overflow, wrap
 
-    @property
-    def text(self):
-        return self._text
+    def _set_option(self, name, value):
+        if value == getattr(self, "_" + name, object()):
+            return
+        setattr(self, "_" + name, value)
+        if name != "color":
+            self._measurement = self._rendered_size = None
+        node = self.parent
+        while node is not None:
+            if isinstance(node, Layer):
+                node.invalidate()
+            node = node.parent
 
-    @text.setter
-    def text(self, value):
-        value = str(value)
-        if value != self._text:
-            self._text = value
-            self._rendered_size = None
-
-    @property
-    def size(self):
-        return self._size
-
-    @size.setter
-    def size(self, value):
+    @staticmethod
+    def _dimension(value, name, *, zero=False):
         value = float(value)
-        if value != self._size:
-            self._size = value
-            self._rendered_size = None
+        if not math.isfinite(value) or value < 0 or (not zero and value == 0):
+            raise ValueError(f"{name} must be finite and {'nonnegative' if zero else 'positive'}")
+        return value
+
+    def _choice(self, name, value, choices):
+        if value not in choices:
+            raise ValueError(f"{name} must be one of {choices}")
+        self._set_option(name, value)
+
+    text = property(lambda self: self._text, lambda self, v: self._set_option("text", str(v)))
+    size = property(lambda self: self._size,
+                    lambda self, v: self._set_option("size", self._dimension(v, "size")))
+    color = property(lambda self: self._color, lambda self, v: self._set_option("color", _color(v)))
+    max_width = property(lambda self: self._max_width,
+                         lambda self, v: self._set_option("max_width", None if v is None else self._dimension(v, "max_width")))
+    line_spacing = property(lambda self: self._line_spacing,
+                            lambda self, v: self._set_option("line_spacing", self._dimension(v, "line_spacing", zero=True)))
+    alignment = property(lambda self: self._alignment,
+                         lambda self, v: self._choice("alignment", v, ("left", "center", "right")))
+    overflow = property(lambda self: self._overflow,
+                        lambda self, v: self._choice("overflow", v, ("clip", "ellipsis")))
+    wrap = property(lambda self: self._wrap,
+                    lambda self, v: self._choice("wrap", v, ("word", "char", "none")))
 
     @property
     def font(self):
@@ -48,33 +73,58 @@ class Label(Node):
 
     @font.setter
     def font(self, value):
-        if value != self._font:
-            self._font = value
-            self._rendered_size = None
+        if value is not None and not isinstance(value, str):
+            raise TypeError("font must be a name or None")
+        if value is not None and "\x00" in value:
+            raise ValueError("font must not contain a null character")
+        self._set_option("font", value)
+
+    @property
+    def max_lines(self):
+        return self._max_lines
+
+    @max_lines.setter
+    def max_lines(self, value):
+        if value is not None:
+            value = operator.index(value)
+            if not 1 <= value <= 100000:
+                raise ValueError("max_lines must be between 1 and 100000, or None")
+        self._set_option("max_lines", value)
+
+    @property
+    def _layout_options(self):
+        return (self.size, self.max_width or 0., self.alignment, self.line_spacing,
+                self.max_lines or 0, self.overflow, self.wrap)
+
+    def _measure(self):
+        if self._measurement is None:
+            from _cocoa import _metal
+            size, width, alignment, spacing, lines, overflow, wrap = self._layout_options
+            self._measurement = _metal.text_layout(self.text, size, self.font, width,
+                alignment, spacing, lines, overflow, wrap, 1., False)
+            self._rendered_size = self._measurement["logical_size"]
+        return self._measurement
+
+    def measure(self):
+        """Return (width, height) before node, parent, or camera transforms."""
+        return self._measure()["logical_size"]
+
+    @property
+    def line_count(self):
+        return self._measure()["line_count"]
+
+    @property
+    def truncated(self):
+        return self._measure()["truncated"]
 
     def _snap(self):
-        return (self.x, self.y, self.rotation, self.scale, self.opacity, self.z,
-                self.text, self.size, self.color, self.font)
+        return (*super()._snap(), self.text, self.color, self.font, self._layout_options)
 
     def _bounds(self):
-        if self._rendered_size:
-            w, h = self._rendered_size
-            return (-w/2, -h/2, w/2, h/2)
-        w = max(self.size * 0.6 * max(len(self.text), 1), self.size * 0.6)
-        h = self.size * 1.2
-        return (-w/2, -h/2, w/2, h/2)
+        width, height = self.measure()
+        return (-width / 2, -height / 2, width / 2, height / 2)
 
     def _layout_bounds(self, renderer=None):
-        if renderer is not None and self.text:
-            try:
-                scale = (renderer.screen_scale if getattr(renderer, "_capturing", False)
-                         else renderer.window.scale)
-                pixel_size = max(10, int(round(self.size * scale)))
-                tex = renderer.text_texture(self.text, self.font, pixel_size)
-                raster_scale = pixel_size / self.size if self.size > 0 else scale
-                self._rendered_size = (tex.size[0] / raster_scale, tex.size[1] / raster_scale)
-            except Exception:
-                pass
         return self._bounds()
 
     def _collider(self):
@@ -87,21 +137,34 @@ class Label(Node):
 
     def _emit(self, cmds, renderer, world, opacity, order):
         if not self.text:
+            self._measure()
             return
-        s = max(_avg_scale(world), 0.001)
-        base_pfs = max(10, int(round(self.size * renderer.screen_scale)))
-        tex = renderer.text_texture(self.text, self.font, base_pfs)
-        raster_scale = base_pfs / self.size if self.size > 0 else renderer.screen_scale
-        dw = tex.size[0] / raster_scale * s
-        dh = tex.size[1] / raster_scale * s
-        self._rendered_size = (dw, dh)
+        requested = self.size * renderer.screen_scale
+        if not math.isfinite(requested) or requested > 16384:
+            raise ValueError("Label raster font size must be finite and at most 16384 pixels.")
+        base_pfs = max(10, int(round(requested)))
+        tex = renderer.text_texture(self.text, self.font, base_pfs, layout=self._layout_options)
+        dw, dh = tex.draw_size
+        self._rendered_size = tex.logical_size
+        self._measurement = {"logical_size": tex.logical_size, "line_count": tex.line_count,
+                             "truncated": tex.truncated}
         center = _apply(world, (0, 0))
         c = _color(self.color)
         order[0] += 1
-        cmds.append(Cmd(self.z, order[0], KIND_TEX,
+        command = Cmd(self.z, order[0], KIND_TEX,
             center[0], center[1], dw/2, dh/2, _rot(world),
             (KIND_TEX, 0, 0, 0), (0, 0, opacity, 0),
-            (0, 0, 0, 0), c, tex))
+            (0, 0, 0, 0), c, tex)
+        # Transform all four corners, including reflection, shear, and
+        # nonuniform scale. Hit tests use the same local paragraph rectangle.
+        def vertex(x, y, u, v):
+            return struct.pack("<4f", *_apply(world, (x, y)), u, v)
+        tl = vertex(-dw / 2, -dh / 2, 0, 0)
+        tr = vertex(dw / 2, -dh / 2, 1, 0)
+        bl = vertex(-dw / 2, dh / 2, 0, 1)
+        br = vertex(dw / 2, dh / 2, 1, 1)
+        command._vb = tl + tr + bl + tr + br + bl
+        cmds.append(command)
 
 
 class Image(Node):

@@ -18,6 +18,20 @@
 @end
 
 @implementation CocoaPyInputView
+- (void)scrollWheel:(NSEvent *)event {
+    CocoaPySceneTextInput *owner = self.inputOwner;
+    BOOL forward = ![owner.options[@"multiline"] boolValue];
+    if (!forward && owner.scrollView) {
+        NSClipView *clip = owner.scrollView.contentView;
+        CGFloat limit = MAX(0, self.bounds.size.height - clip.bounds.size.height);
+        CGFloat offset = clip.bounds.origin.y;
+        CGFloat delta = event.scrollingDeltaY;
+        forward = fabs(event.scrollingDeltaX) > fabs(delta) ||
+            (delta > 0 && offset <= .5) || (delta < 0 && offset >= limit - .5);
+    }
+    if (!owner.headless && forward) [owner.surface scrollWheel:event];
+    else [super scrollWheel:event];
+}
 - (NSRect)firstRectForCharacterRange:(NSRange)range actualRange:(NSRangePointer)actualRange {
     CocoaPySceneTextInput *owner = self.inputOwner;
     if (!owner.headless) return [super firstRectForCharacterRange:range actualRange:actualRange];
@@ -59,7 +73,8 @@
 @implementation CocoaPyInputHost
 - (BOOL)isFlipped { return YES; }
 - (NSView *)hitTest:(NSPoint)point {
-    return self.inputOwner.headless ? nil : [super hitTest:point];
+    NSPoint local = [self convertPoint:point fromView:self.superview];
+    return self.inputOwner.headless || ![self.inputOwner containsClipPoint:local] ? nil : [super hitTest:point];
 }
 - (void)drawRect:(NSRect)dirty {
     CocoaPySceneTextInput *owner = self.inputOwner;
@@ -266,8 +281,15 @@
     self.host.frame = NSMakeRect(t.tx - width * sx / 2, t.ty - height * sy / 2, width * sx, height * sy);
     self.host.bounds = NSMakeRect(0, 0, width, height);
     self.host.frameCenterRotation = atan2(t.b, t.a) * 180.0 / M_PI;
+    // AppKit's frame-center rotation can shift a view with scaled bounds.
+    // Align its actual converted center after applying both transformations.
+    NSPoint center = [self.host convertPoint:NSMakePoint(NSMidX(self.host.bounds), NSMidY(self.host.bounds))
+                                     toView:self.surface];
+    NSPoint origin = self.host.frame.origin;
+    [self.host setFrameOrigin:NSMakePoint(origin.x + t.tx - center.x, origin.y + t.ty - center.y)];
     self.host.alphaValue = self.headless ? 0 : self.opacity;
     self.host.hidden = !self.shown || !(self.focused || self.activating);
+    [self applyClips];
 }
 
 - (BOOL)textView:(NSTextView *)view shouldChangeTextInRange:(NSRange)range replacementString:(NSString *)text {

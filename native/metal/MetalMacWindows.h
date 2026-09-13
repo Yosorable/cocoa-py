@@ -48,8 +48,14 @@ static PyObject *metal_create_window(PyObject *, PyObject *args, PyObject *kwarg
             record.handle = handle; record.window = window; record.controller = controller;
             record.layer = layer; record.displayLink = displayLink;
             record.vsyncSemaphore = semaphore; record.frameSemaphore = dispatch_semaphore_create(1);
-            std::lock_guard<std::mutex> lock(gStateMutex);
-            gWindows.emplace(handle, std::move(record));
+            CocoaPySceneEventObserver *observer = [CocoaPySceneEventObserver new];
+            observer.handle = handle; observer.window = window;
+            record.eventObserver = observer;
+            {
+                std::lock_guard<std::mutex> lock(gStateMutex);
+                gWindows.emplace(handle, std::move(record));
+            }
+            [observer start];
         }
     });
     return PyLong_FromLongLong(handle);
@@ -66,11 +72,22 @@ static PyObject *metal_close_window(PyObject *, PyObject *args) {
     }
     if (pool) objc_autoreleasePoolPop(pool);
     runOnMainSync(^{
+        CocoaPySceneEventObserver *observer = nil;
+        {
+            std::lock_guard<std::mutex> lock(gStateMutex);
+            auto it = gWindows.find(handle);
+            if (it != gWindows.end()) observer = it->second.eventObserver;
+        }
+        [observer stop];
         metalCloseTextInputsForWindow(handle);
-        std::lock_guard<std::mutex> lock(gStateMutex);
-        auto it = gWindows.find(handle);
-        if (it == gWindows.end()) return;
-        auto &record = it->second;
+        WindowRecord record{};
+        {
+            std::lock_guard<std::mutex> lock(gStateMutex);
+            auto it = gWindows.find(handle);
+            if (it == gWindows.end()) return;
+            record = std::move(it->second);
+            gWindows.erase(it);
+        }
         [record.displayLink invalidate];
         record.controller.vsyncSemaphore = nil;
         if (record.vsyncSemaphore) dispatch_semaphore_signal(record.vsyncSemaphore);
@@ -78,7 +95,6 @@ static PyObject *metal_close_window(PyObject *, PyObject *args) {
         record.window.delegate = nil;
         [record.window orderOut:nil];
         [record.window close];
-        gWindows.erase(it);
     });
     Py_RETURN_NONE;
 }

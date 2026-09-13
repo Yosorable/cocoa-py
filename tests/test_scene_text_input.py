@@ -11,7 +11,7 @@ import tempfile
 import unittest
 
 from _cocoa import _metal
-from scene import Layer, Node, Scene, TextField, TextView, TextInputSession, gpu
+from scene import ClipRect, Group, Layer, Node, Rect, Scene, ScrollView, TextField, TextView, TextInputSession, Touch, TouchPhase, gpu
 from scene._text_input import process_inputs
 
 
@@ -135,6 +135,206 @@ class TextInputNativeTests(unittest.TestCase):
         self.assertEqual(field.text, "A🌙B")
         field.redo(); process_inputs(self.scene)
         self.assertEqual(field.text, "A中文B")
+
+    def test_native_editor_clips_without_restarting_composition(self):
+        parent = Group(x=200, y=150, rotation=.25, clip=ClipRect(-50, -40, 100, 80, 15))
+        field = TextField(240, 60, text="A", clip=ClipRect(-110, -30, 220, 60, 8))
+        self.scene.add(parent.add(field))
+        self.scene._render()
+        field.focus()
+        self.scene._render()
+        process_inputs(self.scene)
+        self.native(field, "marked", "拼", start=1)
+        handle, marked = field._native, field.marked_range
+        inside = self.native(field, "pointer", start=120, count=30)
+        outside = self.native(field, "pointer", start=20, count=30)
+        self.assertTrue(inside["pointer_hit"])
+        self.assertFalse(outside["pointer_hit"])
+        self.assertEqual(inside["clip_count"], 2)
+        self.assertTrue(inside["has_mask"])
+        parent.x += 30
+        self.scene._render()
+        self.assertEqual((field._native, field.marked_range), (handle, marked))
+        parent.clip = field.clip = None
+        self.scene._render()
+        outside = self.native(field, "pointer", start=20, count=30)
+        self.assertTrue(outside["pointer_hit"])
+        self.assertFalse(outside["has_mask"])
+
+    def test_native_clip_bridge_rejects_invalid_regions(self):
+        field = self.control()
+        for region in ((0,) * 10, (math.nan,) * 11, (1, 0, 0, 1, 0, 0, 0, 0, -1, 10, 0)):
+            with self.subTest(region=region), self.assertRaises(ValueError):
+                _metal.text_input_frame(field._native, field._world_transform, 1., True, (region,))
+
+    def test_input_in_screen_layer_keeps_native_editor_at_viewport_position(self):
+        field = TextField(180, 50, x=200, y=150)
+        self.scene.ui.add(field)
+        self.scene.position = (100, 100)
+        self.scene.camera.zoom = 2
+        self.scene.camera.rotation = .3
+        self.scene._render()
+        field.focus()
+        self.scene._render()
+        process_inputs(self.scene)
+        state = self.native(field)
+        x, y, width, height = state["frame"]
+        self.assertEqual((x + width / 2, y + height / 2), (200, 150))
+        self.assertEqual(state["rotation"], 0)
+
+    def test_scrolling_reveals_native_input_and_keyboard_preserves_editor_height(self):
+        view = ScrollView(220, 180, x=200, y=200, content_size=(220, 600))
+        field = TextField(180, 50, x=110, y=570, text="A")
+        self.scene.ui.add(view.add(field))
+        self.scene._render()
+        field.focus()
+        self.scene._render()
+        process_inputs(self.scene)
+        self.assertTrue(field.focused)
+        self.assertGreater(view.offset[1], 400)
+        self.native(field, "marked", "拼", start=1)
+        marked = field.marked_range
+        self.scene._keyboard_frame = (0, 220, self.scene.width, 400)
+        self.scene._render()
+        state = self.native(field)
+        self.assertEqual(state["frame"][3], 50)
+        self.assertLessEqual(state["frame"][1] + state["frame"][3], 220)
+        self.assertEqual(field.marked_range, marked)
+        self.assertEqual(view.height, 180)
+
+    def test_cropped_layer_native_editor_keeps_the_cached_quad_anchor(self):
+        layer = Layer(x=20, y=50, scale=(2, 1), clip=(20, -15, 30, 30))
+        field = TextField(40, 20, x=40, text="A", z=1)
+        self.scene.ui.add(layer.add(Rect(200, 100), field))
+        self.scene._render()
+        field.focus()
+        self.scene._render()
+        state = self.native(field)
+        self.assertEqual(field.world_position, (80., 50.))
+        self.assertAlmostEqual(state["center"][0], field.world_position[0])
+        self.assertAlmostEqual(state["center"][1], field.world_position[1])
+
+    def test_keyboard_avoidance_updates_scroll_content_and_native_editor_immediately(self):
+        from unittest.mock import patch
+
+        view = ScrollView(220, 180, x=200, y=200, content_size=(220, 600))
+        field = TextField(180, 50, x=110, y=570, text="A")
+        decoration = Rect(20, 20, x=110, y=520)
+        self.scene.ui.add(view.add(field, decoration))
+        self.scene._render()
+        field.focus()
+        self.scene._render()
+        process_inputs(self.scene)
+        self.native(field, "marked", "拼", start=1)
+        marked = field.marked_range
+        original = view.offset[1]
+        self.scene.speed = 0
+        target = (0, 220, self.scene.width, self.scene.height - 220)
+        changes = []
+        self.scene.keyboard_changed = changes.append
+        with patch.object(_metal, "text_input_keyboard", return_value=target):
+            self.scene._tick_frame(0)
+            self.scene._render()
+            raised = view.offset[1]
+            self.assertGreater(raised, original)
+            self.assertEqual(raised, view.max_offset[1])
+            state = self.native(field)
+            self.assertTrue(state["scene_managed_placement"])
+            native_center = state["frame"][1] + state["frame"][3] / 2
+            self.assertAlmostEqual(native_center, field.world_position[1])
+            self.assertAlmostEqual(field.world_position[1] - decoration.world_position[1], 50)
+            self.assertLessEqual(state["frame"][1] + state["frame"][3], target[1])
+            self.assertEqual(field.marked_range, marked)
+            self.assertEqual(state["frame"][3], 50)
+            self.assertEqual(view.height, 180)
+            self.scene._tick_frame(.5)
+            self.scene._render()
+            self.assertEqual(view.offset[1], raised)
+            self.assertEqual(changes, [target])
+
+        field.blur()
+        process_inputs(self.scene)
+        with patch.object(_metal, "text_input_keyboard", return_value=None):
+            self.scene._tick_frame(0)
+            self.scene._render()
+            self.assertEqual(view.offset[1], original)
+            self.assertAlmostEqual(field.world_position[1] - decoration.world_position[1], 50)
+            self.assertEqual(changes, [target, None])
+            self.assertEqual(view.height, 180)
+
+    def test_native_keyboard_avoidance_is_only_managed_by_vertical_scroll_ancestors(self):
+        view = ScrollView(220, 180, x=200, y=200, content_size=(220, 600))
+        field = TextField(180, 50, x=110, y=570)
+        self.scene.ui.add(view.add(field))
+        self.scene._render()
+        field.focus()
+        self.scene._render()
+        self.assertTrue(self.native(field)["scene_managed_placement"])
+        field.avoid_keyboard = False
+        self.scene._render()
+        self.assertFalse(self.native(field)["scene_managed_placement"])
+        before = view.offset
+        self.scene._keyboard_frame = (0, 220, self.scene.width, 400)
+        self.scene._render()
+        self.assertEqual(view.offset, before)
+        field.avoid_keyboard = True
+        view.direction = "horizontal"
+        self.scene._render()
+        self.assertFalse(self.native(field)["scene_managed_placement"])
+
+    def test_dragging_over_inactive_input_defers_focus_until_a_completed_tap(self):
+        view = ScrollView(220, 180, x=200, y=200, content_size=(220, 600))
+        field = TextField(180, 50, x=110, y=60)
+        self.scene.ui.add(view.add(field))
+        self.scene._render()
+        def touch(phase, point, timestamp):
+            self.scene._pointer_router.feed(Touch(1, point, point, TouchPhase(phase), timestamp))
+        point = field.world_position
+        touch("began", point, 1.)
+        self.scene._render()
+        self.assertFalse(field.focused)
+        touch("moved", (point[0], point[1] - 30), 1.1)
+        touch("cancelled", (point[0], point[1] - 30), 1.2)
+        self.scene._render()
+        self.assertFalse(field.focused)
+        point = field.world_position
+        touch("began", point, 2.)
+        touch("ended", point, 2.1)
+        self.scene._render()
+        process_inputs(self.scene)
+        self.assertTrue(field.focused)
+
+    def test_horizontal_drag_over_input_in_vertical_scroller_is_not_a_tap(self):
+        view = ScrollView(240, 180, x=200, y=200, content_size=(240, 600))
+        field = TextField(200, 50, x=120, y=60)
+        self.scene.ui.add(view.add(field))
+        self.scene._render()
+        x, y = field.world_position
+        for phase, point, timestamp in (("began", (x, y), 1.), ("moved", (x + 30, y), 1.1),
+                                         ("ended", (x + 30, y), 1.2)):
+            self.scene._pointer_router.feed(Touch(1, point, point, TouchPhase(phase), timestamp))
+        self.scene._render()
+        self.assertFalse(field.focused)
+        self.assertIsNone(field._pending_focus)
+
+    def test_drag_in_scrolling_content_keeps_editor_focused_and_background_tap_blurs(self):
+        view = ScrollView(240, 180, x=200, y=200, content_size=(240, 600))
+        field = TextField(140, 40, x=120, y=40)
+        self.scene.ui.add(view.add(field))
+        self.scene._render()
+        field.focus()
+        self.scene._render()
+        process_inputs(self.scene)
+        point = (90, 260)
+        for phase, position, timestamp in (("began", point, 1.), ("moved", (90, 220), 1.1),
+                                            ("cancelled", (90, 220), 1.2)):
+            self.scene._pointer_router.feed(Touch(1, position, position, TouchPhase(phase), timestamp))
+        self.scene._render()
+        self.assertTrue(field.focused)
+        for phase, timestamp in (("began", 2.), ("ended", 2.1)):
+            self.scene._pointer_router.feed(Touch(2, point, point, TouchPhase(phase), timestamp))
+        process_inputs(self.scene)
+        self.assertFalse(field.focused)
 
     def test_programmatic_replacement_emits_change_but_assignment_is_silent(self):
         changes = []
@@ -394,6 +594,8 @@ class TextInputNativeTests(unittest.TestCase):
         field = self.control(rotation=math.radians(30), scale=(1.5, 0.8))
         state = self.native(field)
         self.assertAlmostEqual(state["rotation"], 30, places=5)
+        self.assertAlmostEqual(state["center"][0], field.world_position[0])
+        self.assertAlmostEqual(state["center"][1], field.world_position[1])
 
     def test_event_queue_is_bounded_and_retains_latest_state(self):
         field = self.control()

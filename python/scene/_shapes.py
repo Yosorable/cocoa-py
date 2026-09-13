@@ -27,6 +27,8 @@ class Circle(Node):
         return (-e, -e, e, e)
 
     def contains_point(self, wx, wy):
+        if not self._inside_clip(wx, wy):
+            return False
         lx, ly = self.convert_from_world(wx, wy)
         r = self.radius + self.stroke_width * 0.5
         return lx * lx + ly * ly <= r * r
@@ -160,6 +162,8 @@ class Line(Node):
         return (min(xs)-p, min(ys)-p, max(xs)+p, max(ys)+p)
 
     def contains_point(self, wx, wy):
+        if not self._inside_clip(wx, wy):
+            return False
         lx, ly = self.convert_from_world(wx, wy)
         sx, sy = self.start
         ex, ey = self.end

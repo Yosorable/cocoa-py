@@ -25,6 +25,12 @@ class Scene(Node):
     ``self.scale`` transforms the entire scene (simple camera).
     """
 
+    # Desktop scenes keep animating when another application is active. UIKit
+    # always suspends scene frames while Metal presentation is disallowed.
+    pause_when_inactive = False
+    key_repeat_delay = .5
+    key_repeat_interval = .05
+
     def __init__(self, **kw):
         super().__init__(**kw)
         self.camera = Camera(self)
@@ -49,6 +55,17 @@ class Scene(Node):
             self._physics_world = PhysicsWorld()
         return self._physics_world
 
+    @property
+    def ui(self):
+        """The default ScreenLayer, drawn over world content in viewport points."""
+        from ._screen_layer import ScreenLayer
+        layer = getattr(self, "_ui_layer", None)
+        if layer is None:
+            self._ui_layer = layer = ScreenLayer()
+        if layer.parent is not self:
+            self.add(layer)
+        return layer
+
     def setup(self):
         pass
 
@@ -70,9 +87,45 @@ class Scene(Node):
     def touch_ended(self, touch: Touch):
         pass
 
+    def touch_cancelled(self, touch: Touch):
+        """A touch was cancelled. Defaults to the legacy touch_ended callback."""
+        self.touch_ended(touch)
+
     def keyboard_changed(self, frame):
         """The software keyboard's screen-space rectangle changed (or is None)."""
         pass
+
+    def key_down(self, event):
+        """Handle an unconsumed hardware key. Return True to handle Escape."""
+        return False
+
+    def key_up(self, event):
+        """A game key was released; event.cancelled marks interrupted holds."""
+        pass
+
+    def window_state_changed(self, state):
+        """Activity, foreground presentation, or key-window focus changed."""
+        pass
+
+    def safe_area_changed(self, insets):
+        """Safe area insets changed, independently of the viewport size."""
+        pass
+
+    @property
+    def window_state(self):
+        return self._platform_input.state
+
+    @property
+    def keys_down(self):
+        return self._platform_input.keys_down
+
+    @property
+    def key_codes_down(self):
+        return self._platform_input.key_codes_down
+
+    def is_key_down(self, key):
+        """Query a logical key name or a physical Keyboard/Keypad HID usage."""
+        return key.lower() in self.keys_down if isinstance(key, str) else key in self.key_codes_down
 
     @property
     def keyboard_frame(self):
@@ -102,6 +155,21 @@ class Scene(Node):
         target.focus()
         return target
 
+    @property
+    def focused_node(self):
+        """The focused scene control/editor, or None for no focus or a text session."""
+        manager = getattr(self, "_focus_manager", None)
+        return manager.focused_node if manager is not None else None
+
+    def focus_next(self, current=None, *, reverse=False):
+        """Focus the next eligible control/editor in node insertion order."""
+        return self._focus_manager.next(current, reverse=reverse)
+
+    def clear_focus(self):
+        """Clear scene control focus and dismiss any active text input."""
+        self._focus_manager.clear()
+        self.dismiss_keyboard()
+
     # ── built-in ──
 
     @property
@@ -124,7 +192,7 @@ class Scene(Node):
     @property
     def safe_area(self):
         """Safe area insets: (top, left, bottom, right) in points."""
-        return self._window._metrics.get('safe_area', (0, 0, 0, 0))
+        return (getattr(self._window, "_metrics", None) or {}).get('safe_area', (0, 0, 0, 0))
 
     @property
     def fps(self):
@@ -144,11 +212,17 @@ class Scene(Node):
     def hit_test(self, x, y):
         """Return the frontmost interactive node at (x, y), or None.
         Nodes with passthrough=True are skipped."""
-        return _scene_accel.hit_test(self._interactive_nodes, x, y)
+        return _scene_accel.hit_test(self._current_interactive_nodes(), x, y)
 
     def hit_test_all(self, x, y):
         """Return all interactive nodes at (x, y), front-to-back."""
-        return _scene_accel.hit_test_all(self._interactive_nodes, x, y)
+        return _scene_accel.hit_test_all(self._current_interactive_nodes(), x, y)
+
+    def _current_interactive_nodes(self):
+        if getattr(self, "_hit_nodes_dirty", False):
+            self._interactive_nodes = [node for node in self._interactive_nodes if node._tree_root() is self]
+            self._hit_nodes_dirty = False
+        return self._interactive_nodes
 
     # ── collision ──
 
@@ -163,8 +237,13 @@ class Scene(Node):
         self._window = window
         self._renderer = renderer if renderer is not None else Renderer(window)
         self._owns_renderer = renderer is None
+        from ._pointer import PointerRouter
+        self._pointer_router = PointerRouter(self)
+        from ._focus import FocusManager
+        self._focus_manager = FocusManager(self)
         self.background = normalize_color(background)
         self.dt = 0.0
+        self._frame_dt = 0.0
         self.frame = 0
         self.elapsed = 0.0
         self._fps = 60
@@ -179,23 +258,74 @@ class Scene(Node):
         self._keyboard_frame = None
         self._text_input_offscreen = False
         self._director = None
+        self._ui_structure_dirty = True
+        self._input_reveal_key = None
+        self._prev_safe_area = None
+        self._close_requested = False
+        self._scene_closed = self._scene_closing = False
+        from ._events import PlatformInput
+        self._platform_input = PlatformInput(self)
 
-    def _frame(self, dt):
-        self._renderer._begin_onscreen_slot()
+    def _frame(self, dt, *, poll=True):
+        if poll:
+            self._platform_input.poll()
+        if not self._platform_input.gpu_allowed:
+            self._dispatch_ui_events()
+            return
         try:
+            self._renderer._begin_onscreen_slot()
             self._tick_frame(dt)
             self._render()
             self._dispatch_frame_touches(dt)
+        except _metal.WindowSuspendedError:
+            self._renderer._abort_onscreen_slot()
+            self._invalidate_graphics()
+            self._platform_input.poll()
+            self._render_fingerprint = 0
         except Exception:
             self._renderer._abort_onscreen_slot()
+            self._invalidate_graphics()
             raise
+
+    def _invalidate_graphics(self):
+        """Recover node-owned raster caches after unsubmitted GPU work is lost."""
+        renderer = self._renderer
+        if renderer is None:
+            return
+        handle = getattr(self._window, "handle", None)
+        if handle is not None:
+            _metal.discard_pending_draws(handle)
+        if hasattr(renderer, "_tc"):
+            renderer._tc.clear()
+        from ._node import Layer
+        from ._path_node import Path
+        from ._shader import ShaderNode
+        pending, visited = [self], set()
+        while pending:
+            node = pending.pop()
+            if id(node) in visited:
+                continue
+            visited.add(id(node))
+            Node._drop_internal_caches(node)
+            pending.extend(node.children)
+            if isinstance(node, Layer):
+                node.invalidate()
+            elif isinstance(node, Path):
+                node._texture_version = -1
+            elif isinstance(node, ShaderNode):
+                node.invalidate()
+                pending.extend(value for value in node._user_textures.values() if isinstance(value, ShaderNode))
+        self._render_fingerprint = 0
 
     def _tick_frame(self, dt):
         """Advance time, actions, camera, user update — no rendering."""
-        scene_dt = dt * self.speed
+        dt = self._platform_input.frame_dt(dt)
+        self._frame_dt = dt or 0.
+        scene_dt = (dt or 0.) * self.speed
         self.dt = scene_dt
         self.elapsed += scene_dt
-        self.frame += 1
+        if dt is not None:
+            self.frame += 1
         self._window.sync()
 
         from ._text_input import process_inputs
@@ -209,6 +339,12 @@ class Scene(Node):
         if sz != self._prev_size:
             self._prev_size = sz
             self.resize(sz[0], sz[1])
+        insets = self.safe_area
+        if insets != self._prev_safe_area:
+            self._prev_safe_area = insets
+            self.safe_area_changed(insets)
+        if dt is None:
+            return
 
         self._tick_self(scene_dt)
         for c in list(self.children):
@@ -225,10 +361,89 @@ class Scene(Node):
         """Process touch events and gestures for this frame."""
         self._process_touches()
         for n in list(self._gesture_nodes):
-            gesture_dt = dt * n.time_scale
+            gesture_dt = self._frame_dt * n.time_scale
             for g in n.gestures:
                 g.tick(gesture_dt)
             self._prune_gesture_node(n)
+        self._dispatch_ui_events()
+
+    def _ensure_ui_nodes(self):
+        if not getattr(self, "_ui_structure_dirty", True):
+            return
+        from ._text_input import _TextInput
+        layouts, events, inputs, focusable = [], [], [], []
+        def walk(node):
+            for child in list(node.children):
+                walk(child)
+            if node is self:
+                return
+            if getattr(node, "_layout", None) is not None:
+                layouts.append(node)
+            if getattr(node, "_dispatch_ui_events", None) is not None:
+                events.append(node)
+            if isinstance(node, _TextInput):
+                inputs.append(node)
+            if isinstance(node, _TextInput) or getattr(node, "_is_control", False):
+                focusable.append(node)
+        walk(self)
+        self._ui_layout_nodes, self._ui_event_nodes, self._input_control_nodes = layouts, events, inputs
+        self._focusable_nodes = focusable
+        self._ui_structure_dirty = False
+
+    def _dispatch_ui_events(self):
+        if getattr(self, "_dispatching_ui_events", False):
+            return
+        self._dispatching_ui_events = True
+        try:
+            from ._text_input import process_inputs
+            process_inputs(self)
+            if self._focus_manager._text_blur_pending:
+                self._focus_manager._text_blur_pending = False
+                process_inputs(self)
+            self._focus_manager.dispatch()
+            self._ensure_ui_nodes()
+            for node in self._ui_event_nodes:
+                if node._tree_root() is self:
+                    node._dispatch_ui_events()
+        finally:
+            self._dispatching_ui_events = False
+
+    def _prepare_layout(self, root=None, *, update_focus=True):
+        if root is None or root is self:
+            self._ensure_ui_nodes()
+            for node in self._ui_layout_nodes:
+                if node._tree_root() is self:
+                    node._layout()
+            if update_focus and not getattr(self._renderer, "_capturing", False):
+                self._focus_manager.maintain()
+            return
+        def walk(node):
+            for child in list(node.children):
+                walk(child)
+            layout = getattr(node, "_layout", None)
+            if layout is not None:
+                layout()
+        walk(root)
+
+    def _prepare_input_visibility(self):
+        self._ensure_ui_nodes()
+        key = (self.size, self.safe_area, self._keyboard_frame)
+        changed = key != self._input_reveal_key
+        self._input_reveal_key = key
+        for node in self._input_control_nodes:
+            if node._closed or not node.enabled or node._tree_root() is not self:
+                continue
+            if node._pending_focus is None and not (changed and node.focused):
+                continue
+            if node._pending_focus is None and not node.avoid_keyboard:
+                continue
+            if not node._current_geometry()[2]:
+                continue
+            parent = node.parent
+            while parent is not None:
+                if getattr(parent, "_is_scroll_view", False) and not parent.dragging:
+                    parent.ensure_visible(node)
+                parent = parent.parent
 
     def _camera_root_transform(self):
         """Compute the root transform combining camera with Scene's own Node transform."""
@@ -239,6 +454,7 @@ class Scene(Node):
         from ._text_input import sync_inputs
 
         self._renderer.screen_scale = self._window.scale
+        self._renderer._screen_transform = _IDENTITY
         self._renderer._text_input_offscreen = target_texture is not None
         if self._text_input_offscreen != (target_texture is not None):
             self._text_input_offscreen = target_texture is not None
@@ -255,6 +471,9 @@ class Scene(Node):
         )
         previous_fingerprint = self._render_fingerprint if allow_static_skip else 0
         try:
+            self._prepare_layout()
+            if target_texture is None:
+                self._prepare_input_visibility()
             result = _scene_accel.collect(
                 self, root_tf, 1.0, self._renderer.screen_scale, self._renderer,
                 previous_fingerprint)
@@ -301,50 +520,33 @@ class Scene(Node):
             sync_inputs(self)
 
     def _process_touches(self):
-        for e in self._window.consume_touches():
+        platform = self._platform_input
+        platform.poll()
+        platform.polled = False
+        events = [(event.get("timestamp", 0), "touch", event) for event in self._window.consume_touches()]
+        consume_scrolls = getattr(self._window, "consume_scrolls", None)
+        if consume_scrolls is not None:
+            events.extend((event["timestamp"], "scroll", event) for event in consume_scrolls())
+        events.extend((event["timestamp"], "key", event) for event in platform.pending_keys)
+        platform.pending_keys = []
+        events.sort(key=lambda item: item[0])
+        for _, kind, e in events:
+            if e.get("epoch", platform.epoch) != platform.epoch or not platform.accepts_input:
+                continue
+            if kind == "key":
+                platform.feed_key(e)
+                continue
+            if kind == "scroll":
+                self._pointer_router.scroll(e)
+                continue
             phase = _PHASES[e["phase"]] if e["phase"] < 4 else _PHASES[3]
             # Touches stay in screen space — _world_transform includes camera,
             # so hit_test and contains_point work correctly in screen space.
             # Use camera.screen_to_world() for world coordinates in game logic.
-            t = Touch(e["id"], (e["x"], e["y"]), (e["prev_x"], e["prev_y"]), phase)
-
-            if phase == "began":
-                node = self.hit_test(t.position[0], t.position[1])
-                from ._text_input import _TextInput
-                input_node = node
-                while input_node is not None and not isinstance(input_node, _TextInput):
-                    input_node = input_node.parent
-                if self._text_inputs and (input_node is None or not input_node.enabled):
-                    for control in list(self._text_inputs.values()):
-                        if isinstance(control, _TextInput):
-                            control.blur()
-                owner = self._dispatch_touch(node, 'on_touch_began', t)
-                if owner is not None:
-                    self._touch_owners[t.id] = owner
-                else:
-                    self.touch_began(t)
-            elif phase == "moved":
-                owner = self._touch_owners.get(t.id)
-                if owner is not None:
-                    self._call_handler(owner, 'on_touch_moved', t)
-                    self._prune_gesture_node(owner)
-                else:
-                    self.touch_moved(t)
-            elif phase == "cancelled":
-                owner = self._touch_owners.pop(t.id, None)
-                if owner is not None:
-                    self._call_handler(owner, 'on_touch_cancelled', t)
-                    self._prune_gesture_node(owner)
-                    # fallback to on_touch_ended if no cancelled handler
-                else:
-                    self.touch_ended(t)
-            else:  # ended
-                owner = self._touch_owners.pop(t.id, None)
-                if owner is not None:
-                    self._call_handler(owner, 'on_touch_ended', t)
-                    self._prune_gesture_node(owner)
-                else:
-                    self.touch_ended(t)
+            t = Touch(e["id"], (e["x"], e["y"]), (e["prev_x"], e["prev_y"]), phase,
+                      e.get("timestamp", 0.0))
+            self._pointer_router.feed(t)
+        platform.repeat_keys()
 
     def _dispatch_touch(self, node, method, touch):
         """Walk up from node, find first handler. Returns handling node or None."""
@@ -357,14 +559,21 @@ class Scene(Node):
                                   'on_touch_ended': 'touch_ended'}
                 gm = gesture_method.get(method)
                 if gm:
-                    for g in cur.gestures:
+                    for g in list(cur.gestures):
                         g._node = cur
+                        self._touch_owners[touch.id] = cur
                         if getattr(g, gm)(touch):
-                            self._gesture_nodes.add(cur)
+                            if cur._tree_root() is self:
+                                self._gesture_nodes.add(cur)
                             return cur
+                        if self._touch_owners.get(touch.id) is cur:
+                            self._touch_owners.pop(touch.id)
+                        if cur._tree_root() is not self or touch.id not in self._pointer_router.active:
+                            return None
             # Then check node-level handlers
             handler = getattr(cur, method, None)
             if handler is not None:
+                self._touch_owners[touch.id] = cur
                 handler(touch)
                 return cur
             cur = cur.parent
@@ -409,33 +618,52 @@ class Scene(Node):
         self._director._present(scene_or_class, transition)
 
     def _close(self):
-        for handle, node in list(self._text_inputs.items()):
+        if getattr(self, "_scene_closing", False) or getattr(self, "_scene_closed", False):
+            return
+        self._scene_closing = True
+        failure = None
+        def attempt(operation):
+            nonlocal failure
             try:
-                node.blur()
-            except KeyError:
-                pass
+                operation()
+            except BaseException as error:
+                if failure is None:
+                    failure = error
         try:
-            self.stop()
-        except Exception:
-            import traceback
-            traceback.print_exc()
-        # Destroy physics world before clearing children
-        if self._physics_world is not None:
-            self._physics_world.destroy()
-            self._physics_world = None
-        Node.close(self)
-        # Input sessions are intentionally outside the drawable node tree.
-        for session in list(self._text_inputs.values()):
-            session.close()
-        self._interactive_nodes = []
-        self._touch_owners.clear()
-        self._gesture_nodes.clear()
-        self._render_fingerprint = 0
-        self._render_background = None
-        self._render_metrics_key = None
-        if getattr(self, '_renderer', None) is not None and getattr(self, '_owns_renderer', True):
-            self._renderer.close()
-        self._renderer = None
+            attempt(self._platform_input.cancel_interactions)
+            try:
+                self.stop()
+            except Exception:
+                import traceback
+                traceback.print_exc()
+            except BaseException as error:
+                if failure is None:
+                    failure = error
+            if self._physics_world is not None:
+                attempt(self._physics_world.destroy)
+                self._physics_world = None
+            attempt(lambda: Node.close(self))
+            # Sessions live outside the drawable tree. Native input cleanup must
+            # also finish when a node callback raised earlier in teardown.
+            for session in list(self._text_inputs.values()):
+                attempt(session.close)
+            self._text_inputs.clear()
+            self._interactive_nodes = []
+            self._touch_owners.clear()
+            self._gesture_nodes.clear()
+            self._focus_manager.current = None
+            self._focus_manager._notifications.clear()
+            self._ui_event_nodes = self._ui_layout_nodes = self._input_control_nodes = self._focusable_nodes = []
+            self._render_fingerprint = 0
+            self._render_background = self._render_metrics_key = None
+            if self._renderer is not None and self._owns_renderer:
+                attempt(self._renderer.close)
+        finally:
+            self._renderer = None
+            self._scene_closed = True
+            self._scene_closing = False
+        if failure is not None:
+            raise failure
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -487,6 +715,10 @@ class _SceneDirector:
     def _apply_present(self, scene_or_class, transition):
         if scene_or_class is self._current:
             raise ValueError("cannot present the current scene again")
+        self._current._platform_input.cancel_interactions()
+        reset_input = getattr(self._window, "reset_input", None)
+        if reset_input is not None:
+            reset_input()
         incoming = self._init_scene(scene_or_class)
         try:
             self._window.sync()
@@ -503,6 +735,8 @@ class _SceneDirector:
             old._close()
         else:
             from ._text_input import suspend_inputs
+            self._current._pointer_router.cancel_all()
+            self._current._dispatch_ui_events()
             suspend_inputs(self._current)
             self._incoming = incoming
             self._transition = transition
@@ -532,6 +766,14 @@ class _SceneDirector:
 
     def _frame(self, dt):
         """One frame: tick scenes, render, process input."""
+        consume = getattr(self._window, "consume_platform_events", None)
+        payload = consume() if consume is not None else None
+        self._current._platform_input.poll(payload, receive_keys=self._incoming is None,
+                                           notify=not self._needs_setup)
+        if self._incoming is not None:
+            self._incoming._platform_input.poll(payload)
+        if not self._current._platform_input.gpu_allowed:
+            return
         if self._pending_present is not None and self._incoming is None:
             request = self._pending_present
             self._pending_present = None
@@ -542,14 +784,16 @@ class _SceneDirector:
         if self._incoming is not None:
             self._frame_transition(dt)
         else:
-            self._current._frame(dt)
+            self._current._frame(dt, poll=False)
 
     def _frame_transition(self, dt):
         """Frame during active transition."""
-        self._transition_elapsed += dt
+        platform = self._incoming._platform_input
+        transition_dt = 0. if platform.reset_dt or (not platform.state.active and self._incoming.pause_when_inactive) else dt
+        self._transition_elapsed += transition_dt
         progress = min(1.0, self._transition_elapsed / self._transition.duration)
-        self._renderer._begin_onscreen_slot()
         try:
+            self._renderer._begin_onscreen_slot()
             # Ensure textures match current window size
             self._ensure_textures()
 
@@ -565,8 +809,16 @@ class _SceneDirector:
             renderer = self._current._renderer
             self._transition.compose(progress, self._tex_old, self._tex_new,
                                      renderer, self._window)
+        except _metal.WindowSuspendedError:
+            self._renderer._abort_onscreen_slot()
+            self._transition_elapsed -= transition_dt
+            self._current._invalidate_graphics()
+            self._incoming._invalidate_graphics()
+            return
         except Exception:
             self._renderer._abort_onscreen_slot()
+            self._current._invalidate_graphics()
+            self._incoming._invalidate_graphics()
             raise
 
         # Touches go to the incoming scene only
@@ -588,20 +840,33 @@ class _SceneDirector:
         old._close()
 
     def _close(self):
-        """Clean up all scenes and resources."""
-        self._pending_present = None
-        if self._incoming is not None:
-            self._incoming._director = None
-            self._incoming._close()
-            self._incoming = None
-        self._release_textures()
-        if self._current is not None:
-            self._current._director = None
-            self._current._close()
-            self._current = None
-        if self._renderer is not None:
-            self._renderer.close()
+        """Release every scene and shared resource, even if a callback fails."""
+        if getattr(self, "_closing", False):
+            return
+        self._closing = True
+        failure = None
+        def attempt(operation):
+            nonlocal failure
+            try:
+                operation()
+            except BaseException as error:
+                if failure is None:
+                    failure = error
+        try:
+            self._pending_present = None
+            for scene in (self._incoming, self._current):
+                if scene is not None:
+                    scene._director = None
+                    attempt(scene._close)
+            self._incoming = self._current = None
+            attempt(self._release_textures)
+            if self._renderer is not None:
+                attempt(self._renderer.close)
             self._renderer = None
+        finally:
+            self._closing = False
+        if failure is not None:
+            raise failure
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -643,7 +908,19 @@ def run(scene_class, *, title="Scene", background="#000000", fps=60,
                 break
 
             director._frame(dt)
+            target = director._incoming or director._current
+            if target._close_requested:
+                break
             _metal.vsync(window._handle)
     finally:
-        director._close()
-        window.close()
+        import sys
+        prior_error = sys.exc_info()[1]
+        try:
+            director._close()
+        except BaseException:
+            if prior_error is None:
+                raise
+            import traceback
+            traceback.print_exc()
+        finally:
+            window.close()

@@ -264,7 +264,9 @@ class Frame:
 
     def __exit__(self, *exc):
         try: _metal.end_frame(self._wh)
-        except Exception: pass
+        except Exception:
+            if not exc or exc[0] is None:
+                raise
         return False
 
     def set_pipeline(self, p):
@@ -374,7 +376,9 @@ class BlitPass:
 
     def __exit__(self, *exc):
         try: _metal.end_blit(self._wh)
-        except Exception: pass
+        except Exception:
+            if not exc or exc[0] is None:
+                raise
         return False
 
     def copy_texture_to_buffer(self, texture, buffer, bytes_per_row=0):
@@ -404,7 +408,9 @@ class ComputePass:
 
     def __exit__(self, *exc):
         try: _metal.end_compute(self._wh)
-        except Exception: pass
+        except Exception:
+            if not exc or exc[0] is None:
+                raise
         return False
 
     def set_pipeline(self, p):
@@ -491,9 +497,27 @@ class Window:
         try: return _metal.consume_touches(self._handle)
         except Exception: return []
 
+    @property
+    def state(self):
+        """Current activity, presentation, and window-focus state."""
+        return _metal.window_state(self._handle)
+
+    def consume_platform_events(self):
+        return _metal.consume_platform_events(self._handle)
+
+    def enable_key_events(self, enabled=True):
+        _metal.keyboard_events(self._handle, bool(enabled))
+
+    def reset_input(self):
+        _metal.reset_window_input(self._handle)
+
     def consume_actions(self):
         """Return and clear queued action/close button presses."""
         return _metal.consume_actions(self._handle)
+
+    def consume_scrolls(self):
+        """Return and clear mouse/trackpad scrolling deltas in viewport points."""
+        return _metal.consume_scrolls(self._handle)
 
     def should_close(self) -> bool:
         return self.consume_actions().get("close", 0) > 0

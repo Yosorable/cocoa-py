@@ -219,6 +219,11 @@ class _TextInputState:
         if self._closed:
             raise RuntimeError("Text input is closed")
         self._pending_focus = self.select_all_on_focus if select_all is None else bool(select_all)
+        root = self._tree_root()
+        manager = getattr(root, "_focus_manager", None)
+        if manager is not None and self.enabled and not self.read_only:
+            if not isinstance(self, Node) or manager.eligible(self):
+                manager.clear()
         return self
 
     def blur(self):
@@ -311,6 +316,8 @@ class _TextInputState:
         self._selection = tuple(state["selection"])
         self._marked_range = None if state["marked_range"] is None else tuple(state["marked_range"])
         self._focused = bool(state["focused"])
+        if self._focused and self._input_scene is not None:
+            self._input_scene._focus_manager.clear()
         if before != (self._text, self._selection, self._marked_range, self._focused):
             self._changed()
 
@@ -322,6 +329,8 @@ class _TextInputState:
         kind = event["kind"]
         if kind in ("change", "selection") and stale:
             return
+        if kind == "focus" and self._input_scene is not None:
+            self._input_scene._focus_manager.dispatch()
         callback = getattr(self, {"change": "on_change", "selection": "on_selection_change",
                                  "focus": "on_focus", "blur": "on_blur", "submit": "on_submit"}.get(kind, ""), None)
         if callback is not None:
@@ -331,7 +340,7 @@ class _TextInputState:
 
     def _navigate_input(self, *, reverse=False):
         if self._input_scene is not None:
-            self._input_scene.focus_next_input(self, reverse=reverse)
+            self._input_scene.focus_next(self, reverse=reverse)
 
     def on_touch_began(self, touch):
         if self.enabled and not self._closed:
@@ -540,19 +549,13 @@ class TextView(_TextInput):
 
 def _input_nodes(root):
     result = []
-    def walk(node, world, opacity, visible):
-        world = _mul(world, _matrix(node.position, node.rotation, node.scale))
-        opacity *= node.opacity
-        visible = visible and node.visible and opacity > 0.001
-        if isinstance(node, _TextInput):
-            result.append((node, world, opacity, visible))
-        if isinstance(node, Layer) and node._lcenter is not None:
-            anchor = node._lcenter
-            world = _mul(_matrix(_apply(world, anchor), _rot(world), _avg_scale(world)),
-                         _matrix((-anchor[0], -anchor[1]), 0, 1))
-        for child in node.children:
-            walk(child, world, opacity, visible)
-    walk(root, root._camera_root_transform(), 1.0, True)
+    root._ensure_ui_nodes()
+    for node in root._input_control_nodes:
+        if node._tree_root() is not root:
+            continue
+        world, opacity, visible, clips = node._current_geometry()
+        node._input_clips = clips
+        result.append((node, world, opacity, visible))
     return result
 
 
@@ -567,9 +570,17 @@ def sync_inputs(root, *, visible=True):
         # non-uniform transforms. Native editing and snapshots occupy one rect.
         world = _matrix(_apply(world, (0, 0)), _rot(world),
                         (math.hypot(world[0], world[1]), math.hypot(world[2], world[3])))
-        frame = (world, opacity, bool(visible and shown and node.enabled), node._sent_revision)
+        clips = node._input_clips
+        parent = node.parent
+        managed = False
+        while parent is not None:
+            if getattr(parent, "_is_scroll_view", False) and parent.direction != "horizontal":
+                managed = node.avoid_keyboard
+                break
+            parent = parent.parent
+        frame = (world, opacity, bool(visible and shown and node.enabled), clips, node._sent_revision, managed)
         if frame != getattr(node, "_native_frame", None):
-            _metal.text_input_frame(node._native, world, opacity, bool(visible and shown and node.enabled))
+            _metal.text_input_frame(node._native, world, opacity, bool(visible and shown and node.enabled), clips, managed)
             node._native_frame = frame
         if node._pending_focus is not None and visible and shown and node.enabled:
             select_all = node._pending_focus

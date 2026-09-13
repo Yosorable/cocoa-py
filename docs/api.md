@@ -80,6 +80,11 @@ component. Call `session.begin(scene)` / `session.end()` and draw the text,
 selection and caret yourself. Its `caret_rect` positions input-method UI, while
 `Scene.keyboard_changed()` lets a custom interface respond to the keyboard.
 
+`ClipRect`, `ScreenLayer`, `ScrollView`, `Button`, `Slider`, and `Toggle` support
+scene-based interfaces. `Label` supports shaped paragraphs and truncation;
+Scene exposes hardware key events, control focus, safe-area and window-state
+changes. See [Scene UI foundations](scene-ui.md) for APIs and interaction rules.
+
 macOS uses mouse input and resizable AppKit windows. iOS keeps UIKit touch input.
 Window orientation options select an initial desktop aspect ratio. Close windows
 and GPU resources explicitly, or use their supported context managers.

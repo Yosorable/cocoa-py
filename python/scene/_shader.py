@@ -139,7 +139,7 @@ class ShaderNode(Node):
 
     def _snap(self):
         return (self.x, self.y, self.rotation, self.scale, self.opacity, self.z,
-                self._shader_size, self._tex._handle if self._tex else None)
+                self._shader_size, self._tex._handle if self._tex else None, self._dirty)
 
     def _bounds(self):
         w, h = self._shader_size
@@ -159,6 +159,7 @@ class ShaderNode(Node):
         # First frame: init GPU + render
         if self._pipe is None:
             self._init_gpu(renderer)
+        if self._dirty:
             self._render_shader()
             self._dirty = False
         if self._tex is None:

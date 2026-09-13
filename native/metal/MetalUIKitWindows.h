@@ -78,13 +78,18 @@ static PyObject *metal_create_window(PyObject *self, PyObject *args, PyObject *k
         CADisplayLink *displayLink = [CADisplayLink displayLinkWithTarget:controller selector:@selector(vsyncFired)];
         [displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
 
-        std::lock_guard<std::mutex> lock(gStateMutex);
-        gWindows.emplace(handle, WindowRecord{handle, window, controller, layer, nil, nil, nil, nil, nil, nil,
-            nil, nil, NO,
-            nil, 0, 0, 0, MTLPixelFormatInvalid,
-            nil, 0, 0, 0,  /* stencilTexture, stencilWidth, stencilHeight, stencilSampleCount */
-            nil, 0, 0, 0, MTLPixelFormatInvalid,
-            displayLink, vsync, frameSemaphore, 0, 0, NO, nullptr, NO, NO, nil, {}});
+        WindowRecord record{};
+        record.handle = handle; record.window = window; record.controller = controller;
+        record.layer = layer; record.displayLink = displayLink;
+        record.vsyncSemaphore = vsync; record.frameSemaphore = frameSemaphore;
+        CocoaPySceneEventObserver *observer = [CocoaPySceneEventObserver new];
+        observer.handle = handle; observer.window = window;
+        record.eventObserver = observer;
+        {
+            std::lock_guard<std::mutex> lock(gStateMutex);
+            gWindows.emplace(handle, std::move(record));
+        }
+        [observer start];
     });
 
     if (handle == 0) {
@@ -115,34 +120,43 @@ static PyObject *metal_close_window(PyObject *self, PyObject *args) {
     }
 
     runOnMainSync(^{
+        CocoaPySceneEventObserver *observer = nil;
+        {
+            std::lock_guard<std::mutex> lock(gStateMutex);
+            auto it = gWindows.find(handle);
+            if (it != gWindows.end()) observer = it->second.eventObserver;
+        }
+        [observer stop];
         metalCloseTextInputsForWindow(handle);
-        std::lock_guard<std::mutex> lock(gStateMutex);
-        auto it = gWindows.find(handle);
-        if (it == gWindows.end()) {
-            return;
+        WindowRecord record{};
+        {
+            std::lock_guard<std::mutex> lock(gStateMutex);
+            auto it = gWindows.find(handle);
+            if (it == gWindows.end()) return;
+            record = std::move(it->second);
+            gWindows.erase(it);
         }
-        UIWindowScene *scene = it->second.window.windowScene;
-        [it->second.displayLink invalidate];
-        it->second.displayLink = nil;
-        if (it->second.vsyncSemaphore) {
-            dispatch_semaphore_signal(it->second.vsyncSemaphore);
+        UIWindowScene *scene = record.window.windowScene;
+        [record.displayLink invalidate];
+        record.displayLink = nil;
+        if (record.vsyncSemaphore) {
+            dispatch_semaphore_signal(record.vsyncSemaphore);
         }
-        it->second.vsyncSemaphore = nil;
-        if (it->second.frameSemaphore) {
-            dispatch_semaphore_signal(it->second.frameSemaphore);
+        record.vsyncSemaphore = nil;
+        if (record.frameSemaphore) {
+            dispatch_semaphore_signal(record.frameSemaphore);
         }
-        it->second.frameSemaphore = nil;
-        it->second.encoder = nil;
-        it->second.commandBuffer = nil;
-        it->second.drawable = nil;
-        it->second.targetTexture = nil;
-        it->second.layer = nil;
-        it->second.window.hidden = YES;
-        it->second.window.rootViewController = nil;
-        it->second.window.windowScene = nil;
-        it->second.window = nil;
-        it->second.controller = nil;
-        gWindows.erase(it);
+        record.frameSemaphore = nil;
+        record.encoder = nil;
+        record.commandBuffer = nil;
+        record.drawable = nil;
+        record.targetTexture = nil;
+        record.layer = nil;
+        record.window.hidden = YES;
+        record.window.rootViewController = nil;
+        record.window.windowScene = nil;
+        record.window = nil;
+        record.controller = nil;
 
         // Trigger re-query of the now-key window's supported orientations,
         // so any scene-imposed lock is released cleanly.
@@ -365,4 +379,3 @@ static PyObject *metal_set_action_label(PyObject *self, PyObject *args, PyObject
     }
     Py_RETURN_NONE;
 }
-

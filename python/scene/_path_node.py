@@ -309,6 +309,8 @@ class Path(Node):
         return self._local_bounds
 
     def contains_point(self, wx, wy):
+        if not self._inside_clip(wx, wy):
+            return False
         self._ensure_flattened()
         if not self._flattened_subpaths:
             return False

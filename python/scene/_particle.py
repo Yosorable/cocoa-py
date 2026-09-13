@@ -160,7 +160,7 @@ class ParticleEmitter(Node):
                     self._spawn(to_spawn, world)
         super()._tick_self(dt)
 
-    def _collect(self, cmds, renderer, transform, opacity, order):
+    def _collect_unclipped(self, cmds, renderer, transform, opacity, order):
         if not self.visible or opacity <= 0.001:
             return
         world = _mul(transform, _matrix((self.x, self.y), self.rotation, self.scale))
@@ -184,7 +184,7 @@ class ParticleEmitter(Node):
             self._init_gpu(renderer)
 
     def _render_particles(self, frame, renderer, opacity, *, msaa=False,
-                          resolution=None, transform=None):
+                          resolution=None, transform=None, clipped=False):
         """Called during the render pass to issue the instanced draw call."""
         if self._pbuf is None:
             return
@@ -196,10 +196,10 @@ class ParticleEmitter(Node):
             *transform, 0, 0))
         tex = self.texture
         if tex is not None:
-            frame.set_pipeline(renderer._pp_tex_ms if msaa else renderer._pp_tex)
+            frame.set_pipeline(renderer._scene_pipeline("pp_tex_ms" if msaa else "pp_tex", clipped))
             frame.set_fragment_texture(tex, 0)
         else:
-            frame.set_pipeline(renderer._pp_ms if msaa else renderer._pp)
+            frame.set_pipeline(renderer._scene_pipeline("pp_ms" if msaa else "pp", clipped))
         frame.set_vertex_buffer(self._pbuf, 0)
         frame.set_vertex_buffer(self._ubuf, 1)
         frame.draw_instanced("triangle", 0, 6, self.max_particles)

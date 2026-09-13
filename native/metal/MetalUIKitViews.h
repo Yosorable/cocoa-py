@@ -6,6 +6,7 @@
 
 @implementation CocoaPyMetalSurfaceView
 + (Class)layerClass { return [CAMetalLayer class]; }
+- (BOOL)canBecomeFirstResponder { return YES; }
 @end
 
 /* Overlay buttons animate scale and background on press. Keep the background
@@ -154,4 +155,3 @@
 }
 
 @end
-

@@ -1,6 +1,7 @@
 // Native text editing for Scene. Python conversion stays on the calling
 // interpreter thread; editors, delegates and event queues stay on the main thread.
 #pragma once
+#import <QuartzCore/QuartzCore.h>
 
 static NSString *inputNormalize(NSString *text, bool multiline, NSInteger limit) {
     text = [text stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"];
@@ -63,6 +64,14 @@ static NSTextAlignment inputAlignment(NSString *alignment) {
 
 @class CocoaPySceneTextInput;
 #if COCOA_PY_UIKIT
+@interface CocoaPyInputHost : UIView
+#else
+@interface CocoaPyInputHost : NSView
+#endif
+@property(nonatomic, weak) CocoaPySceneTextInput *inputOwner;
+@end
+
+#if COCOA_PY_UIKIT
 @interface CocoaPyInputField : UITextField
 @property(nonatomic, weak) CocoaPySceneTextInput *inputOwner;
 @end
@@ -70,16 +79,13 @@ static NSTextAlignment inputAlignment(NSString *alignment) {
 @property(nonatomic, weak) CocoaPySceneTextInput *inputOwner;
 @end
 @interface CocoaPySceneTextInput : NSObject <UITextFieldDelegate, UITextViewDelegate>
-@property(nonatomic, strong) UIView *host;
+@property(nonatomic, strong) CocoaPyInputHost *host;
 @property(nonatomic, strong) CocoaPyInputField *field;
 @property(nonatomic, strong) CocoaPyInputView *textView;
 @property(nonatomic, strong) UILabel *placeholderLabel;
 @property(nonatomic) CGRect keyboardFrame;
 #else
 @interface CocoaPyInputView : NSTextView
-@property(nonatomic, weak) CocoaPySceneTextInput *inputOwner;
-@end
-@interface CocoaPyInputHost : NSView
 @property(nonatomic, weak) CocoaPySceneTextInput *inputOwner;
 @end
 @interface CocoaPySceneTextInput : NSObject <NSTextFieldDelegate, NSTextViewDelegate>
@@ -96,11 +102,14 @@ static NSTextAlignment inputAlignment(NSString *alignment) {
 @property(nonatomic) unsigned long long revision;
 @property(nonatomic) BOOL closed, suppress, shown, focused, activating;
 @property(nonatomic) BOOL headless;
+@property(nonatomic) BOOL sceneManagedPlacement;
 @property(nonatomic) CGRect caretRect;
 @property(nonatomic) NSInteger marking;
 @property(nonatomic) NSRange savedSelection;
 @property(nonatomic) CGAffineTransform placement;
 @property(nonatomic) CGFloat opacity;
+@property(nonatomic, copy) NSArray<NSArray<NSNumber *> *> *clipRegions;
+@property(nonatomic, copy) NSArray *clipPaths;
 @property(nonatomic, copy) NSString *lastText;
 @property(nonatomic) NSRange lastSelection, lastMarked;
 - (void)changed;
@@ -113,6 +122,8 @@ static NSTextAlignment inputAlignment(NSString *alignment) {
 - (NSDictionary *)state;
 - (BOOL)shouldChangeRange:(NSRange)range replacement:(NSString *)replacement;
 - (void)close;
+- (void)applyClips;
+- (BOOL)containsClipPoint:(CGPoint)point;
 @end
 
 @interface CocoaPySceneTextInput (Platform)
@@ -144,6 +155,41 @@ static NSMutableDictionary<NSNumber *, NSValue *> *gInputKeyboardFrames;
 #endif
 
 @implementation CocoaPySceneTextInput
+
+- (BOOL)containsClipPoint:(CGPoint)point {
+    for (id path in self.clipPaths)
+        if (!CGPathContainsPoint((__bridge CGPathRef)path, nullptr, point, false)) return NO;
+    return YES;
+}
+
+- (void)applyClips {
+    NSMutableArray *paths = [NSMutableArray new];
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    self.host.layer.mask = nil;
+    CALayer *parent = self.host.layer;
+    for (NSArray<NSNumber *> *region in self.clipRegions) {
+        CGAffineTransform inverse = CGAffineTransformMake(region[0].doubleValue, region[1].doubleValue,
+            region[2].doubleValue, region[3].doubleValue, region[4].doubleValue, region[5].doubleValue);
+        CGAffineTransform world = CGAffineTransformInvert(inverse);
+        CGPoint p0 = [self.host convertPoint:CGPointApplyAffineTransform(CGPointZero, world) fromView:self.surface];
+        CGPoint px = [self.host convertPoint:CGPointApplyAffineTransform(CGPointMake(1, 0), world) fromView:self.surface];
+        CGPoint py = [self.host convertPoint:CGPointApplyAffineTransform(CGPointMake(0, 1), world) fromView:self.surface];
+        CGAffineTransform local = CGAffineTransformMake(px.x - p0.x, px.y - p0.y, py.x - p0.x, py.y - p0.y, p0.x, p0.y);
+        CGRect rect = CGRectMake(region[6].doubleValue, region[7].doubleValue, region[8].doubleValue, region[9].doubleValue);
+        CGPathRef shape = CGPathCreateWithRoundedRect(rect, region[10].doubleValue, region[10].doubleValue, nullptr);
+        CGPathRef path = CGPathCreateCopyByTransformingPath(shape, &local);
+        CGPathRelease(shape);
+        [paths addObject:CFBridgingRelease(path)];
+        CAShapeLayer *mask = [CAShapeLayer layer];
+        mask.frame = self.host.bounds;
+        mask.path = (__bridge CGPathRef)paths.lastObject;
+        parent.mask = mask;
+        parent = mask;
+    }
+    self.clipPaths = paths;
+    [CATransaction commit];
+}
 
 - (NSDictionary *)state {
     NSString *text = self.textValue ?: @"";
@@ -237,6 +283,7 @@ static NSMutableDictionary<NSNumber *, NSValue *> *gInputKeyboardFrames;
 - (void)editingBegan {
     if (self.closed || self.focused) return;
     self.focused = YES;
+    metalTextFocusChanged(self.windowHandle, self.handle, true);
     [self applyPlacement];
     [self enqueue:@"focus"];
 }
@@ -247,6 +294,7 @@ static NSMutableDictionary<NSNumber *, NSValue *> *gInputKeyboardFrames;
     [self changed];
     self.savedSelection = self.selectionRange;
     self.focused = NO;
+    metalTextFocusChanged(self.windowHandle, self.handle, false);
     self.host.hidden = YES;
     [self enqueue:@"blur"];
 }

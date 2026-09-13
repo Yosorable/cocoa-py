@@ -162,7 +162,33 @@ struct TouchEvent {
     double x, y;
     double prevX, prevY;
     double timestamp;
+    unsigned long long epoch = 0;
 };
+
+struct ScrollEvent {
+    double x, y, dx, dy, timestamp;
+    bool precise, momentum;
+    unsigned long long epoch = 0;
+};
+
+struct SceneKeyEvent {
+    unsigned code = 0, modifiers = 0;
+    std::string key;
+    double timestamp = 0;
+    bool down = false, repeat = false, cancelled = false;
+};
+
+struct ScenePlatformEvent {
+    int kind = 0; // 0=key, 1=state, 2=input reset
+    SceneKeyEvent key;
+    bool active = true, foreground = true, focused = true;
+    unsigned long long epoch = 0;
+    double timestamp = 0;
+    std::string reason;
+    unsigned long long sequence = 0;
+};
+
+@class CocoaPySceneEventObserver;
 
 #if COCOA_PY_UIKIT
 #include "MetalUIKitViews.h"
@@ -239,8 +265,18 @@ struct WindowRecord {
     BOOL computeActive;
     __strong id<MTLCommandBuffer> offscreenCB;
     std::vector<TouchEvent> touchQueue;
+    std::vector<ScrollEvent> scrollQueue;
     std::unordered_map<void *, long long> touchIdMap;
     long long nextTouchId = 1;
+    bool active = true, foreground = true, focused = true;
+    bool keyboardEvents = false;
+    long long activeTextInput = 0;
+    unsigned long long inputEpoch = 0;
+    unsigned long long platformSequence = 0;
+    std::vector<ScenePlatformEvent> platformQueue;
+    std::unordered_map<unsigned, SceneKeyEvent> pressedKeys;
+    __strong CocoaPySceneEventObserver *eventObserver;
+    __strong id<MTLCommandBuffer> lastSubmittedCB;
 };
 
 static std::unordered_map<long long, LibraryRecord> gLibraries;
@@ -250,13 +286,17 @@ static std::unordered_map<long long, BufferRecord> gBuffers;
 static std::unordered_map<long long, TextureRecord> gTextures;
 static std::unordered_map<long long, WindowRecord> gWindows;
 
+#include "MetalEvents.h"
+
 #if COCOA_PY_UIKIT
+#include "MetalUIKitInput.h"
 @implementation CocoaPyMetalSurfaceView (Touch)
 - (void)_enqueueTouches:(NSSet<UITouch *> *)touches phase:(int)phase {
     std::lock_guard<std::mutex> lock(gStateMutex);
     auto it = gWindows.find(self.windowHandle);
     if (it == gWindows.end()) return;
     auto &wr = it->second;
+    if (!wr.active || !wr.foreground || !wr.focused) return;
     for (UITouch *touch in touches) {
         void *key = (__bridge void *)touch;
         long long tid;
@@ -266,7 +306,8 @@ static std::unordered_map<long long, WindowRecord> gWindows;
             wr.touchIdMap[key] = tid;
         } else {
             auto mi = wr.touchIdMap.find(key);
-            tid = (mi != wr.touchIdMap.end()) ? mi->second : 0;
+            if (mi == wr.touchIdMap.end()) continue;
+            tid = mi->second;
             if (phase >= 2) {
                 // ended or cancelled: remove mapping
                 wr.touchIdMap.erase(key);
@@ -274,11 +315,15 @@ static std::unordered_map<long long, WindowRecord> gWindows;
         }
         CGPoint loc = [touch locationInView:self];
         CGPoint prev = [touch previousLocationInView:self];
+        if (wr.touchQueue.size() >= 4096) {
+            metalResetInput(wr, "overflow");
+            break;
+        }
         wr.touchQueue.push_back({
             phase, tid,
             loc.x, loc.y,
             prev.x, prev.y,
-            touch.timestamp
+            touch.timestamp, wr.inputEpoch
         });
     }
 }
@@ -603,6 +648,8 @@ static PyObject *metal_destroy_buffer(PyObject *self, PyObject *args) {
     gBuffers.erase(handle);
     Py_RETURN_NONE;
 }
+
+#include "MetalTextLayout.h"
 
 static PyObject *metal_create_text_texture(PyObject *self, PyObject *args, PyObject *kwargs) {
     (void)self;
@@ -1142,6 +1189,7 @@ static PyObject *metal_begin_frame(PyObject *self, PyObject *args, PyObject *kwa
         return nullptr;
     }
     if (sampleCount < 1) sampleCount = 1;
+    if (!metalRequireGPU(windowHandle)) return nullptr;
 
     MTLClearColor clearColor = clearColorFromPyObject(
         clearValue,
@@ -1181,6 +1229,7 @@ static PyObject *metal_begin_frame(PyObject *self, PyObject *args, PyObject *kwa
             errorMessage = @"A Metal frame is already active for this window.";
             return;
         }
+        if (!metalGPUAllowed(*window)) { errorMessage = metalSuspendedMessage; return; }
 
         window->drawable = nil;
         window->targetTexture = nil;
@@ -1201,7 +1250,7 @@ static PyObject *metal_begin_frame(PyObject *self, PyObject *args, PyObject *kwa
             window->commandBuffer = window->offscreenCB;
         } else {
             if (window->offscreenCB) {
-                [window->offscreenCB commit];
+                metalCommit(*window, window->offscreenCB);
                 window->offscreenCB = nil;
             }
 #if COCOA_PY_UIKIT
@@ -1342,7 +1391,7 @@ static PyObject *metal_begin_frame(PyObject *self, PyObject *args, PyObject *kwa
                 dispatch_semaphore_signal(releaseSemaphore);
             }
         }
-        PyErr_SetString(PyExc_RuntimeError, errorMessage.UTF8String);
+        metalSetWindowError(errorMessage);
         return nullptr;
     }
 
@@ -1533,7 +1582,15 @@ static PyObject *metal_end_frame(PyObject *self, PyObject *args) {
         }
         [window->encoder endEncoding];
         window->encoder = nil;
-        if (window->targetTexture) {
+        if (!metalGPUAllowed(*window)) {
+            window->commandBuffer = nil;
+            window->offscreenCB = nil;
+            window->targetTexture = nil;
+            window->drawable = nil;
+            if (window->frameSlotAcquired && window->frameSemaphore) dispatch_semaphore_signal(window->frameSemaphore);
+            window->frameSlotAcquired = NO;
+            errorMessage = metalSuspendedMessage;
+        } else if (window->targetTexture) {
             window->commandBuffer = nil;
             window->targetTexture = nil;
         } else {
@@ -1554,7 +1611,7 @@ static PyObject *metal_end_frame(PyObject *self, PyObject *args) {
             if (window->drawable) {
                 [commandBuffer presentDrawable:window->drawable];
             }
-            [commandBuffer commit];
+            metalCommit(*window, commandBuffer);
             window->commandBuffer = nil;
             window->drawable = nil;
         }
@@ -1576,7 +1633,7 @@ static PyObject *metal_end_frame(PyObject *self, PyObject *args) {
     }
 
     if (errorMessage) {
-        PyErr_SetString(PyExc_RuntimeError, errorMessage.UTF8String);
+        metalSetWindowError(errorMessage);
         return nullptr;
     }
     Py_RETURN_NONE;
@@ -1849,19 +1906,20 @@ static PyObject *metal_begin_blit(PyObject *self, PyObject *args) {
         std::lock_guard<std::mutex> lock(gStateMutex);
         WindowRecord *wr = windowRecord(windowHandle);
         if (!wr) { errorMessage = @"_metal window handle not found."; return; }
+        if (!metalGPUAllowed(*wr)) { errorMessage = metalSuspendedMessage; return; }
         if (wr->blitActive) { errorMessage = @"A blit pass is already active."; return; }
         if (wr->frameActive) { errorMessage = @"End the render pass before starting a blit pass."; return; }
         // Offscreen passes are batched until presentation or an explicit transfer.
         // Submit them first so readback observes the completed rendering.
         if (wr->offscreenCB) {
-            [wr->offscreenCB commit];
+            metalCommit(*wr, wr->offscreenCB);
             wr->offscreenCB = nil;
         }
         wr->blitCommandBuffer = [gCommandQueue commandBuffer];
         wr->blitEncoder = [wr->blitCommandBuffer blitCommandEncoder];
         wr->blitActive = YES;
     });
-    if (errorMessage) { PyErr_SetString(PyExc_RuntimeError, errorMessage.UTF8String); return nullptr; }
+    if (errorMessage) { metalSetWindowError(errorMessage); return nullptr; }
     Py_RETURN_NONE;
 }
 
@@ -1938,13 +1996,15 @@ static PyObject *metal_end_blit(PyObject *self, PyObject *args) {
         if (!wr) { errorMessage = @"_metal window handle not found."; return; }
         if (!wr->blitActive) { errorMessage = @"No blit pass active."; return; }
         [wr->blitEncoder endEncoding];
-        [wr->blitCommandBuffer commit];
-        [wr->blitCommandBuffer waitUntilCompleted];
+        if (metalGPUAllowed(*wr)) {
+            metalCommit(*wr, wr->blitCommandBuffer);
+            [wr->blitCommandBuffer waitUntilCompleted];
+        } else errorMessage = metalSuspendedMessage;
         wr->blitEncoder = nil;
         wr->blitCommandBuffer = nil;
         wr->blitActive = NO;
     });
-    if (errorMessage) { PyErr_SetString(PyExc_RuntimeError, errorMessage.UTF8String); return nullptr; }
+    if (errorMessage) { metalSetWindowError(errorMessage); return nullptr; }
     Py_RETURN_NONE;
 }
 
@@ -2068,12 +2128,13 @@ static PyObject *metal_begin_compute(PyObject *self, PyObject *args) {
         std::lock_guard<std::mutex> lock(gStateMutex);
         WindowRecord *wr = windowRecord(handle);
         if (!wr) { errorMessage = @"Invalid window handle."; return; }
+        if (!metalGPUAllowed(*wr)) { errorMessage = metalSuspendedMessage; return; }
         if (wr->computeActive) { errorMessage = @"Compute pass already active."; return; }
         wr->computeCommandBuffer = [gCommandQueue commandBuffer];
         wr->computeEncoder = [wr->computeCommandBuffer computeCommandEncoder];
         wr->computeActive = YES;
     });
-    if (errorMessage) { PyErr_SetString(PyExc_RuntimeError, errorMessage.UTF8String); return nullptr; }
+    if (errorMessage) { metalSetWindowError(errorMessage); return nullptr; }
     Py_RETURN_NONE;
 }
 
@@ -2153,13 +2214,15 @@ static PyObject *metal_end_compute(PyObject *self, PyObject *args) {
         if (!wr) { errorMessage = @"Invalid window handle."; return; }
         if (!wr->computeActive) { errorMessage = @"No active compute pass."; return; }
         [wr->computeEncoder endEncoding];
-        [wr->computeCommandBuffer commit];
-        [wr->computeCommandBuffer waitUntilCompleted];
+        if (metalGPUAllowed(*wr)) {
+            metalCommit(*wr, wr->computeCommandBuffer);
+            [wr->computeCommandBuffer waitUntilCompleted];
+        } else errorMessage = metalSuspendedMessage;
         wr->computeEncoder = nil;
         wr->computeCommandBuffer = nil;
         wr->computeActive = NO;
     });
-    if (errorMessage) { PyErr_SetString(PyExc_RuntimeError, errorMessage.UTF8String); return nullptr; }
+    if (errorMessage) { metalSetWindowError(errorMessage); return nullptr; }
     Py_RETURN_NONE;
 }
 
@@ -2189,6 +2252,7 @@ static PyObject *metal_acquire_frame_slot(PyObject *self, PyObject *args) {
     (void)self;
     long long handle = 0;
     if (!PyArg_ParseTuple(args, "L", &handle)) return nullptr;
+    if (!metalRequireGPU(handle)) return nullptr;
 
     dispatch_semaphore_t frameSemaphore = nullptr;
     {
@@ -2225,6 +2289,11 @@ static PyObject *metal_acquire_frame_slot(PyObject *self, PyObject *args) {
                 dispatch_semaphore_signal(frameSemaphore);
             }
         } else {
+            if (!metalGPUAllowed(*wr)) {
+                if (frameSemaphore) dispatch_semaphore_signal(frameSemaphore);
+                PyErr_SetString(gWindowSuspendedError, metalSuspendedMessage.UTF8String);
+                return nullptr;
+            }
             wr->frameSlotAcquired = YES;
         }
     }
@@ -2276,7 +2345,7 @@ static PyObject *metal_vsync(PyObject *self, PyObject *args) {
         while (dispatch_semaphore_wait(sem, DISPATCH_TIME_NOW) == 0) {}
     } else {
 #if COCOA_PY_UIKIT
-        dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+        CocoaPyWaitSemaphore(sem, 0.25);
 #else
         CocoaPyWaitSemaphore(sem, 0.25);
         metalMacPumpEvents();
@@ -2288,6 +2357,32 @@ static PyObject *metal_vsync(PyObject *self, PyObject *args) {
 }
 
 // ── touches ──
+
+static PyObject *metal_consume_scrolls(PyObject *, PyObject *args) {
+    long long handle;
+    if (!PyArg_ParseTuple(args, "L", &handle)) return nullptr;
+    std::vector<ScrollEvent> events;
+    {
+        std::lock_guard<std::mutex> lock(gStateMutex);
+        auto window = gWindows.find(handle);
+        if (window == gWindows.end()) {
+            PyErr_SetString(PyExc_KeyError, "Window handle not found."); return nullptr;
+        }
+        events.swap(window->second.scrollQueue);
+    }
+    PyObject *result = PyList_New(events.size());
+    if (!result) return nullptr;
+    for (size_t i = 0; i < events.size(); ++i) {
+        const auto &event = events[i];
+        PyObject *item = Py_BuildValue("{s:d,s:d,s:d,s:d,s:d,s:O,s:O,s:K}",
+            "x", event.x, "y", event.y, "dx", event.dx, "dy", event.dy,
+            "timestamp", event.timestamp, "precise", event.precise ? Py_True : Py_False,
+            "momentum", event.momentum ? Py_True : Py_False, "epoch", event.epoch);
+        if (!item) { Py_DECREF(result); return nullptr; }
+        PyList_SET_ITEM(result, i, item);
+    }
+    return result;
+}
 
 static PyObject *metal_consume_touches(PyObject *self, PyObject *args) {
     (void)self;
@@ -2312,14 +2407,14 @@ static PyObject *metal_consume_touches(PyObject *self, PyObject *args) {
 
     for (size_t i = 0; i < events.size(); i++) {
         const auto &e = events[i];
-        PyObject *dict = Py_BuildValue("{s:i,s:L,s:d,s:d,s:d,s:d,s:d}",
+        PyObject *dict = Py_BuildValue("{s:i,s:L,s:d,s:d,s:d,s:d,s:d,s:K}",
             "phase", e.phase,
             "id", e.touchId,
             "x", e.x,
             "y", e.y,
             "prev_x", e.prevX,
             "prev_y", e.prevY,
-            "timestamp", e.timestamp
+            "timestamp", e.timestamp, "epoch", e.epoch
         );
         if (!dict) { Py_DECREF(list); return nullptr; }
         PyList_SET_ITEM(list, i, dict);
@@ -2416,6 +2511,7 @@ static PyObject *metal_resource_counts(PyObject *self, PyObject *args) {
     dictSetUnsigned(dict, "textures", (unsigned long long)gTextures.size());
     dictSetUnsigned(dict, "texture_bytes", textureBytes);
     dictSetUnsigned(dict, "windows", (unsigned long long)gWindows.size());
+    dictSetUnsigned(dict, "window_event_observers", gSceneEventObservers.load(std::memory_order_relaxed));
     dictSetUnsigned(dict, "text_inputs", gTextInputCount.load(std::memory_order_relaxed));
     dictSetUnsigned(dict, "window_texture_bytes", windowTextureBytes);
     dictSetUnsigned(dict, "active_frames", activeFrames);
@@ -2434,6 +2530,11 @@ static PyObject *metal_resource_counts(PyObject *self, PyObject *args) {
 #include "MetalImages.h"
 
 static PyMethodDef metalMethods[] = {
+    {"window_state", metal_window_state, METH_VARARGS, "Read window lifecycle state."},
+    {"keyboard_events", metal_keyboard_events, METH_VARARGS, "Enable queued keyboard events."},
+    {"reset_window_input", metal_reset_window_input, METH_VARARGS, "Cancel pending input for a scene switch."},
+    {"discard_pending_draws", metal_discard_pending_draws, METH_VARARGS, "Discard unsubmitted offscreen draws between passes."},
+    {"consume_platform_events", metal_consume_platform_events, METH_VARARGS, "Consume keyboard and lifecycle events."},
     {"text_input_normalize", metal_text_input_normalize, METH_VARARGS, "Normalize plain text and its grapheme limit."},
     {"text_input_create", metal_text_input_create, METH_VARARGS, "Create a native scene text editor."},
     {"text_input_update", metal_text_input_update, METH_VARARGS, "Update text editor options."},
@@ -2454,6 +2555,7 @@ static PyMethodDef metalMethods[] = {
     {"window_metrics_if_changed", metal_window_metrics_if_changed, METH_VARARGS, "Return updated window metrics when layout revision changed."},
     {"consume_actions", metal_consume_actions, METH_VARARGS, "Consume action button presses for a window."},
     {"consume_touches", metal_consume_touches, METH_VARARGS, "Consume touch events for a window."},
+    {"consume_scrolls", metal_consume_scrolls, METH_VARARGS, "Consume scrolling deltas in viewport points."},
     {"set_title", (PyCFunction)metal_set_title, METH_VARARGS | METH_KEYWORDS, "Set the presentation window title."},
     {"set_action_label", (PyCFunction)metal_set_action_label, METH_VARARGS | METH_KEYWORDS, "Set or hide the auxiliary action button label."},
     {"create_library", (PyCFunction)metal_create_library, METH_VARARGS | METH_KEYWORDS, "Compile a Metal library from complete source."},
@@ -2465,6 +2567,7 @@ static PyMethodDef metalMethods[] = {
     {"write_buffer", (PyCFunction)metal_write_buffer, METH_VARARGS | METH_KEYWORDS, "Write bytes into a Metal buffer."},
     {"read_buffer", (PyCFunction)metal_read_buffer, METH_VARARGS | METH_KEYWORDS, "Read bytes from a Metal buffer."},
     {"create_text_texture", (PyCFunction)metal_create_text_texture, METH_VARARGS | METH_KEYWORDS, "Rasterize text into a Metal texture."},
+    {"text_layout", metal_text_layout, METH_VARARGS, "Measure or rasterize a shaped label paragraph."},
     {"create_glyph_atlas", (PyCFunction)metal_create_glyph_atlas, METH_VARARGS | METH_KEYWORDS, "Build a glyph atlas texture for a font."},
     {"create_render_texture", (PyCFunction)metal_create_render_texture, METH_VARARGS | METH_KEYWORDS, "Allocate a renderable Metal texture."},
     {"create_image_texture", (PyCFunction)metal_create_image_texture, METH_VARARGS | METH_KEYWORDS, "Load an image file into a Metal texture."},
@@ -2511,7 +2614,15 @@ static struct PyModuleDef metalModule = {
 };
 
 PyMODINIT_FUNC PyInit__metal(void) {
-    return PyModule_Create(&metalModule);
+    PyObject *module = PyModule_Create(&metalModule);
+    if (!module) return nullptr;
+    gWindowSuspendedError = PyErr_NewException("_cocoa._metal.WindowSuspendedError", PyExc_RuntimeError, nullptr);
+    if (!gWindowSuspendedError || PyModule_AddObject(module, "WindowSuspendedError", gWindowSuspendedError) < 0) {
+        Py_XDECREF(gWindowSuspendedError);
+        Py_DECREF(module);
+        return nullptr;
+    }
+    return module;
 }
 
 void registerMetalModule(void) {

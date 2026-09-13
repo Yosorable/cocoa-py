@@ -33,7 +33,7 @@ float sd_seg(float2 p, float2 a, float2 b) {
     return length(pa - ba * clamp(dot(pa, ba) / max(dot(ba, ba), 1e-4), 0.0, 1.0));
 }
 
-fragment float4 shape_frag(VO in [[stage_in]], const device QD* q [[buffer(0)]]) {
+float4 shade_shape(VO in, const device QD* q) {
     QD d = q[in.qid];
     int k = int(d.params.x + 0.5);
     float2 h = float2(d.params.y, d.params.z);
@@ -64,12 +64,54 @@ fragment float4 shape_frag(VO in [[stage_in]], const device QD* q [[buffer(0)]])
     return float4(col * a, a);
 }
 
-fragment float4 tex_frag(VO in [[stage_in]], const device QD* q [[buffer(0)]], texture2d<float> t [[texture(0)]]) {
+float4 shade_texture(VO in, const device QD* q, texture2d<float> t) {
     QD d = q[in.qid];
     constexpr sampler s(address::clamp_to_edge, filter::linear);
     float4 c = t.sample(s, in.uv);
     float f = d.extra.a * d.style.z;
     return float4(c.rgb * d.extra.rgb * f, c.a * f);
+}
+
+// Separate entry points keep the public low-level pipelines independent of
+// Scene clipping. Clip geometry never occupies the path renderer's stencil.
+struct ClipRegion { float4 linear; float4 offset_origin; float4 size_radius; };
+struct ClipInfo { uint count; float scale_x; float scale_y; uint pad; };
+
+float clip_coverage(float2 position, const device ClipRegion* regions, constant ClipInfo& info) {
+    float2 point = position / float2(info.scale_x, info.scale_y);
+    float coverage = 1.0;
+    for (uint i = 0; i < info.count; ++i) {
+        ClipRegion c = regions[i];
+        if (any(c.size_radius.xy <= 0.0)) return 0.0;
+        float2 local = float2(dot(c.linear.xz, point), dot(c.linear.yw, point));
+        local += c.offset_origin.xy - c.offset_origin.zw - c.size_radius.xy * 0.5;
+        float distance = sd_rrect(local, c.size_radius.xy * 0.5, c.size_radius.z);
+        float feather = max(fwidth(distance), 1e-6);
+        coverage = min(coverage, clamp(0.5 - distance / feather, 0.0, 1.0));
+    }
+    return coverage;
+}
+
+fragment float4 shape_frag(VO in [[stage_in]], const device QD* q [[buffer(0)]]) {
+    return shade_shape(in, q);
+}
+
+fragment float4 shape_frag_clipped(VO in [[stage_in]], const device QD* q [[buffer(0)]],
+    const device ClipRegion* clips [[buffer(1)]], constant ClipInfo& info [[buffer(2)]]) {
+    float coverage = clip_coverage(in.position.xy, clips, info);
+    if (coverage <= 0.0) discard_fragment();
+    return shade_shape(in, q) * coverage;
+}
+
+fragment float4 tex_frag(VO in [[stage_in]], const device QD* q [[buffer(0)]], texture2d<float> t [[texture(0)]]) {
+    return shade_texture(in, q, t);
+}
+
+fragment float4 tex_frag_clipped(VO in [[stage_in]], const device QD* q [[buffer(0)]], texture2d<float> t [[texture(0)]],
+    const device ClipRegion* clips [[buffer(1)]], constant ClipInfo& info [[buffer(2)]]) {
+    float coverage = clip_coverage(in.position.xy, clips, info);
+    if (coverage <= 0.0) discard_fragment();
+    return shade_texture(in, q, t) * coverage;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -94,6 +136,14 @@ vertex VOut vector_vertex(const device VIn* v [[buffer(0)]], constant Res& r [[b
 fragment float4 vector_frag(VOut in [[stage_in]], constant Col& c [[buffer(0)]]) {
     float a = c.color.a * in.alpha;
     return float4(c.color.rgb * (a / max(c.color.a, 1e-5)), a);
+}
+
+fragment float4 vector_frag_clipped(VOut in [[stage_in]], constant Col& c [[buffer(0)]],
+    const device ClipRegion* clips [[buffer(1)]], constant ClipInfo& info [[buffer(2)]]) {
+    float coverage = clip_coverage(in.position.xy, clips, info);
+    if (coverage <= 0.0) discard_fragment();
+    float a = c.color.a * in.alpha;
+    return float4(c.color.rgb * (a / max(c.color.a, 1e-5)), a) * coverage;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -253,18 +303,39 @@ vertex ParticleOut particle_vs(uint vid [[vertex_id]],
     return o;
 }
 
-fragment float4 particle_fs(ParticleOut in [[stage_in]]) {
+float4 shade_particle(ParticleOut in) {
     // Soft circle: smoothstep falloff
     float d = length(in.uv);
     float a = smoothstep(1.0, 0.6, d) * in.color.a;
     return float4(in.color.rgb * a, a);  // pre-multiplied alpha
 }
 
-fragment float4 particle_tex_fs(ParticleOut in [[stage_in]],
-                                texture2d<float> tex [[texture(0)]]) {
+float4 shade_particle_texture(ParticleOut in, texture2d<float> tex) {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
     float2 uv = in.uv * 0.5 + 0.5;       // [-1,1] → [0,1]
     float4 t = tex.sample(s, uv);
     float a = t.a * in.color.a;
     return float4(t.rgb * in.color.rgb * a, a);  // tint + pre-multiplied alpha
+}
+
+fragment float4 particle_fs(ParticleOut in [[stage_in]]) {
+    return shade_particle(in);
+}
+
+fragment float4 particle_fs_clipped(ParticleOut in [[stage_in]],
+    const device ClipRegion* clips [[buffer(1)]], constant ClipInfo& info [[buffer(2)]]) {
+    float coverage = clip_coverage(in.position.xy, clips, info);
+    if (coverage <= 0.0) discard_fragment();
+    return shade_particle(in) * coverage;
+}
+
+fragment float4 particle_tex_fs(ParticleOut in [[stage_in]], texture2d<float> tex [[texture(0)]]) {
+    return shade_particle_texture(in, tex);
+}
+
+fragment float4 particle_tex_fs_clipped(ParticleOut in [[stage_in]], texture2d<float> tex [[texture(0)]],
+    const device ClipRegion* clips [[buffer(1)]], constant ClipInfo& info [[buffer(2)]]) {
+    float coverage = clip_coverage(in.position.xy, clips, info);
+    if (coverage <= 0.0) discard_fragment();
+    return shade_particle_texture(in, tex) * coverage;
 }

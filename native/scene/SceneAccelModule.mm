@@ -72,16 +72,20 @@ static PyObject *s__handle;
 static PyObject *s_sprite_size, *s_anchor, *s_flip_x, *s_flip_y, *s_tint, *s__uv_rect;
 /* World transform export */
 static PyObject *s__world_transform, *s__world_opacity;
+static PyObject *s__clip, *s__clip_state, *s__world_clips;
+static PyObject *s__screen_space, *s__screen_layer;
+static PyObject *s__stacking_context;
+static PyObject *s__project_interactions;
 /* Interactive / bounds */
 static PyObject *s_interactive, *s__bounds, *s__rendered_size;
 /* For fallback path */
 static PyObject *s__emit, *s__snap, *s_kind, *s_cx, *s_cy, *s_hw, *s_hh, *s_rot;
 static PyObject *s_params, *s_style, *s_extra;
-static PyObject *s__tex, *s__lsize, *s__lcenter, *s__dirty, *s__rscale, *s__shader_size;
-static PyObject *s__capture_center;
+static PyObject *s__tex, *s__lsize, *s__lcenter, *s__dirty, *s__shader_size;
+static PyObject *s__texture_center;
 static PyObject *s__path_size, *s__path_center, *s__path_version, *s__ensure_texture, *s__raster_dirty, *s__get_meshes;
 static PyObject *s__cached_mesh_scale;
-static PyObject *s__rebuild, *s_text_texture;
+static PyObject *s__prepare_cache, *s_text_texture;
 static PyObject *s_parent;
 /* NineSlice */
 static PyObject *s_nine_size, *s_insets;
@@ -117,13 +121,18 @@ static int intern_strings(void) {
     INTERN(s__cached_mesh_scale, "_cached_mesh_scale");
     INTERN(s__raster_dirty, "_raster_dirty");
     INTERN(s__lsize, "_lsize"); INTERN(s__lcenter, "_lcenter");
-    INTERN(s__capture_center, "_capture_center");
-    INTERN(s__dirty, "_dirty"); INTERN(s__rscale, "_rscale"); INTERN(s__rebuild, "_rebuild");
+    INTERN(s__texture_center, "_texture_center");
+    INTERN(s__dirty, "_dirty"); INTERN(s__prepare_cache, "_prepare_cache");
     INTERN(s_text_texture, "text_texture"); INTERN(s_parent, "parent");
     INTERN(s_sprite_size, "sprite_size"); INTERN(s_anchor, "anchor");
     INTERN(s_flip_x, "flip_x"); INTERN(s_flip_y, "flip_y");
     INTERN(s_tint, "tint"); INTERN(s__uv_rect, "_uv_rect");
     INTERN(s__world_transform, "_world_transform"); INTERN(s__world_opacity, "_world_opacity");
+    INTERN(s__clip, "_clip"); INTERN(s__clip_state, "_clip_state");
+    INTERN(s__world_clips, "_world_clips");
+    INTERN(s__screen_space, "_screen_space"); INTERN(s__screen_layer, "_screen_layer");
+    INTERN(s__stacking_context, "_stacking_context");
+    INTERN(s__project_interactions, "_project_interactions");
     INTERN(s_interactive, "interactive"); INTERN(s__bounds, "_bounds"); INTERN(s__rendered_size, "_rendered_size");
     INTERN(s_nine_size, "nine_size"); INTERN(s_insets, "insets");
     INTERN(s_collision_category, "collision_category"); INTERN(s_collision_mask, "collision_mask");
@@ -163,6 +172,9 @@ typedef struct {
     PyObject *texture;     /* borrowed ref for current frame */
     int mesh_batch_idx;    /* index into mesh_batches for KIND_MESH, -1 otherwise */
     int particle_idx;      /* index into particle_emitters for KIND_PARTICLE, -1 otherwise */
+    PyObject *clips;       /* borrowed from CollectState.clip_contexts */
+    int render_layer;
+    PyObject *sort_scope;  /* borrowed immutable sequence of (z, order) pairs */
 } CCmd;
 
 typedef struct {
@@ -202,6 +214,8 @@ typedef struct {
     PyObject *node;
     double z;
     int order;
+    int render_layer;
+    PyObject *sort_scope;
 } InteractiveEntry;
 
 /* Per-mesh-batch info for direct path rendering */
@@ -245,6 +259,9 @@ typedef struct {
     PyObject **particle_emitters;
     int particle_count;
     int particle_capacity;
+    PyObject *clip_contexts;
+    PyObject *sort_contexts;
+    double screen_transform[6];
 } CollectState;
 
 static inline unsigned long long fingerprint_mix(unsigned long long h, unsigned long long v) {
@@ -950,6 +967,8 @@ static void state_init(CollectState *st, double screen_scale, PyObject *renderer
     st->particle_capacity = 16;
     st->particle_emitters = (PyObject **)malloc(sizeof(PyObject *) * st->particle_capacity);
     st->particle_count = 0;
+    st->clip_contexts = PyList_New(0);
+    st->sort_contexts = PyList_New(0);
 }
 
 static CCmd *state_append(CollectState *st) {
@@ -961,10 +980,13 @@ static CCmd *state_append(CollectState *st) {
 }
 
 static void state_destroy(CollectState *st) {
+    Py_XDECREF(st->clip_contexts);
+    Py_XDECREF(st->sort_contexts);
     Py_XDECREF(st->render_error);
     st->render_error = NULL;
     free(st->cmds);
     st->cmds = NULL;
+    for (int i = 0; i < st->interactive_count; ++i) Py_DECREF(st->interactive[i].node);
     free(st->interactive);
     st->interactive = NULL;
     free(st->mesh_verts);
@@ -1044,16 +1066,74 @@ static void state_append_mesh(CollectState *st,
     mb->fill_rule = fill_rule;
 }
 
-static void state_add_interactive(CollectState *st, PyObject *node, double z, int order) {
+static void state_add_interactive(CollectState *st, PyObject *node, double z, int order, int render_layer,
+                                  PyObject *sort_scope) {
     if (st->interactive_count >= st->interactive_capacity) {
         st->interactive_capacity *= 2;
         st->interactive = (InteractiveEntry *)realloc(st->interactive,
             sizeof(InteractiveEntry) * st->interactive_capacity);
     }
     InteractiveEntry *e = &st->interactive[st->interactive_count++];
+    Py_INCREF(node);
     e->node = node;
     e->z = z;
     e->order = order;
+    e->render_layer = render_layer;
+    e->sort_scope = sort_scope;
+}
+
+static void collect_layer_interactions(PyObject *node, const double world[6], double opacity,
+                                       PyObject *clips, PyObject *scope, int plane, int order,
+                                       double z, CollectState *st) {
+    PyObject *transform = Py_BuildValue("(dddddd)", world[0], world[1], world[2], world[3], world[4], world[5]);
+    PyObject *op = PyFloat_FromDouble(opacity);
+    PyObject *records = transform && op ? PyObject_CallMethodObjArgs(node, s__project_interactions,
+        transform, op, clips, NULL) : NULL;
+    Py_XDECREF(transform); Py_XDECREF(op);
+    if (!records) { state_take_render_error(st); return; }
+    PyObject *suffix = Py_BuildValue("((di))", z, order);
+    PyObject *prefix = suffix ? PySequence_Concat(scope, suffix) : NULL;
+    Py_XDECREF(suffix);
+    if (!prefix || !PyList_Check(records)) {
+        if (!PyErr_Occurred()) PyErr_SetString(PyExc_TypeError, "Layer interaction records must be a list.");
+        Py_XDECREF(prefix); Py_DECREF(records); state_take_render_error(st); return;
+    }
+    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(records); ++i) {
+        PyObject *record = PyList_GET_ITEM(records, i);
+        if (!PyTuple_Check(record) || PyTuple_GET_SIZE(record) != 2) {
+            PyErr_SetString(PyExc_TypeError, "Invalid Layer interaction record."); break;
+        }
+        PyObject *child = PyTuple_GET_ITEM(record, 0);
+        PyObject *key = PyTuple_GET_ITEM(record, 1);
+        if (!PyTuple_Check(key) || PyTuple_GET_SIZE(key) == 0) {
+            PyErr_SetString(PyExc_TypeError, "Invalid Layer interaction order."); break;
+        }
+        for (Py_ssize_t j = 0; j < PyTuple_GET_SIZE(key); ++j) {
+            PyObject *pair = PyTuple_GET_ITEM(key, j);
+            if (!PyTuple_Check(pair) || PyTuple_GET_SIZE(pair) != 2 ||
+                !PyFloat_Check(PyTuple_GET_ITEM(pair, 0)) || !PyLong_Check(PyTuple_GET_ITEM(pair, 1))) {
+                PyErr_SetString(PyExc_TypeError, "Invalid Layer interaction order pair."); break;
+            }
+        }
+        if (PyErr_Occurred()) break;
+        Py_ssize_t last = PyTuple_GET_SIZE(key) - 1;
+        PyObject *parents = PyTuple_GetSlice(key, 0, last);
+        PyObject *combined = parents ? PySequence_Concat(prefix, parents) : NULL;
+        Py_XDECREF(parents);
+        if (!combined) break;
+        PyObject *pair = PyTuple_GET_ITEM(key, last);
+        long child_order = PyLong_AsLong(PyTuple_GET_ITEM(pair, 1));
+        if (PyErr_Occurred() || child_order < 0 || child_order > INT_MAX) {
+            if (!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError, "Invalid Layer interaction order value.");
+            Py_DECREF(combined); break;
+        }
+        if (PyList_Append(st->sort_contexts, combined) < 0) { Py_DECREF(combined); break; }
+        state_add_interactive(st, child, PyFloat_AS_DOUBLE(PyTuple_GET_ITEM(pair, 0)),
+                              (int)child_order, plane, combined);
+        Py_DECREF(combined);
+    }
+    Py_DECREF(prefix); Py_DECREF(records);
+    state_take_render_error(st);
 }
 
 /* ─────────────────────────────────────────────────────────────────────── */
@@ -1406,119 +1486,6 @@ static void emit_line(PyObject *node, CNodeCache *cache, CollectState *st,
     Py_XDECREF(start_obj); Py_XDECREF(end_obj); Py_XDECREF(color_obj);
 }
 
-static void emit_label(PyObject *node, CNodeCache *cache, CollectState *st,
-                       const double world[6], double op) {
-    PyObject *text_obj = PyObject_GetAttr(node, s_text);
-    double font_size = read_double(node, s_size);
-    PyObject *font_obj = PyObject_GetAttr(node, s_font);
-    PyObject *color_obj = PyObject_GetAttr(node, s_color);
-
-    double requested_size = round(font_size * st->screen_scale);
-    if (!isfinite(requested_size) || requested_size > 16384) {
-        PyErr_SetString(PyExc_ValueError, "Label raster font size must be finite and at most 16384 pixels.");
-        state_take_render_error(st);
-        Py_XDECREF(text_obj); Py_XDECREF(font_obj); Py_XDECREF(color_obj);
-        cache->valid = 0;
-        return;
-    }
-    int pfs = (int)fmax(10, requested_size);
-
-    int old_cmd_count = cache->cmd_count;
-    cache->cmd_count = 0;
-
-    if (!text_obj || !PyUnicode_Check(text_obj) || PyUnicode_GET_LENGTH(text_obj) == 0) {
-        PyObject *cached_text = (text_obj && PyUnicode_Check(text_obj)) ? text_obj : Py_None;
-        for (int i = 0; i < old_cmd_count; i++) { Py_XDECREF(cache->cmds[i].texture); cache->cmds[i].texture = NULL; }
-        for (int i = 0; i < cache->color_count; i++) Py_XDECREF(cache->colors[i]);
-        cache->colors[0] = color_obj; Py_XINCREF(color_obj);
-        cache->colors[1] = cached_text; Py_INCREF(cached_text);
-        cache->colors[2] = font_obj;  Py_XINCREF(font_obj);
-        cache->color_count = 3;
-        double shape[2] = { font_size, (double)pfs };
-        memcpy(cache->shape, shape, sizeof(shape));
-        cache->shape_len = 2;
-        Py_XDECREF(text_obj);
-        Py_XDECREF(font_obj);
-        Py_XDECREF(color_obj);
-        return;
-    }
-
-    double s = c_avg_scale(world);
-    if (s < 0.001) s = 0.001;
-    /* Render texture at base size (no world scale) so it stays cached
-       during scale animations.  GPU quad handles the scaling. */
-
-    /* Call renderer.text_texture(text, font, pixel_size) */
-    PyObject *pfs_obj = PyLong_FromLong(pfs);
-    PyObject *tex = PyObject_CallMethodObjArgs(st->renderer, s_text_texture,
-                                                text_obj, font_obj, pfs_obj, NULL);
-    Py_XDECREF(pfs_obj);
-    if (!tex && state_take_render_error(st)) {
-        Py_XDECREF(text_obj); Py_XDECREF(font_obj); Py_XDECREF(color_obj);
-        cache->cmd_count = old_cmd_count;
-        cache->valid = 0;
-        return;
-    }
-
-    if (tex && tex != Py_None) {
-        PyObject *tsz = PyObject_GetAttr(tex, s_size);
-        double tw = 0, th = 0;
-        if (tsz && PyTuple_Check(tsz) && PyTuple_GET_SIZE(tsz) >= 2) {
-            tw = PyFloat_AsDouble(PyTuple_GET_ITEM(tsz, 0));
-            th = PyFloat_AsDouble(PyTuple_GET_ITEM(tsz, 1));
-        }
-        Py_XDECREF(tsz);
-        if (PyErr_Occurred()) PyErr_Clear();
-
-        /* A minimum raster font size must not enlarge the logical label. */
-        double raster_scale = font_size > 0 ? pfs / font_size : st->screen_scale;
-        double dw = tw / raster_scale * s;
-        double dh = th / raster_scale * s;
-        /* Cache rendered size for accurate _bounds / _collider */
-        PyObject *rsz = Py_BuildValue("(dd)", dw, dh);
-        if (rsz) { PyObject_SetAttr(node, s__rendered_size, rsz); Py_DECREF(rsz); }
-        if (PyErr_Occurred()) PyErr_Clear();
-        double cx_, cy_;
-        c_apply(world, 0, 0, &cx_, &cy_);
-        float rot = (float)c_rot(world);
-
-        float color_rgba[4] = {1,1,1,1};
-        c_parse_color(color_obj, color_rgba);
-
-        CCmd *cmd = &cache->cmds[0];
-        st->order++;
-        cmd->z = cache->base[6];
-        cmd->order = st->order;
-        cmd->kind = KIND_TEX;
-        pack_verts((float)cx_, (float)cy_, (float)(dw/2), (float)(dh/2), rot, cmd->vb);
-        float p[4] = {(float)KIND_TEX, 0, 0, 0};
-        float sty_[4] = {0, 0, (float)op, 0};
-        float fill_[4] = {0, 0, 0, 0};
-        float ext[4] = {color_rgba[0], color_rgba[1], color_rgba[2], color_rgba[3]};
-        pack_quad(p, sty_, fill_, ext, cmd->qb);
-        /* Store texture ref — steal ref from CallMethodObjArgs */
-        Py_XDECREF(cache->cmds[0].texture);
-        cache->cmds[0].texture = tex;  /* steal ref */
-        tex = NULL;  /* prevent double decref */
-        cache->cmd_count = 1;
-    }
-
-    for (int i = cache->cmd_count; i < old_cmd_count; i++) {
-        Py_XDECREF(cache->cmds[i].texture); cache->cmds[i].texture = NULL;
-    }
-    for (int i = 0; i < cache->color_count; i++) Py_XDECREF(cache->colors[i]);
-    cache->colors[0] = color_obj; Py_XINCREF(color_obj);
-    cache->colors[1] = text_obj;  Py_XINCREF(text_obj);
-    cache->colors[2] = font_obj;  Py_XINCREF(font_obj);
-    cache->color_count = 3;
-
-    double shape[2] = { font_size, (double)pfs };
-    memcpy(cache->shape, shape, sizeof(shape));
-    cache->shape_len = 2;
-
-    Py_XDECREF(text_obj); Py_XDECREF(font_obj); Py_XDECREF(color_obj);
-    Py_XDECREF(tex);
-}
 
 static void emit_image(PyObject *node, CNodeCache *cache, CollectState *st,
                        const double world[6], double op) {
@@ -1853,10 +1820,9 @@ static void handle_unknown_emit(PyObject *node, CNodeCache *cache, CollectState 
 static void emit_shadernode(PyObject *node, CNodeCache *cache, CollectState *st,
                             const double world[6], double op) {
     PyObject *tex_obj = PyObject_GetAttr(node, s__tex);
-    if (!tex_obj || tex_obj == Py_None) {
+    if (!tex_obj || tex_obj == Py_None || read_bool(node, s__dirty)) {
         Py_XDECREF(tex_obj);
-        /* Texture not yet created — fall back to Python _emit() which runs _init_gpu.
-           Invalidate cache so next frame re-emits via the C path once _tex is ready. */
+        /* Create or refresh the offscreen content through the Python emitter. */
         handle_unknown_emit(node, cache, st, world, op);
         cache->valid = 0;
         return;
@@ -2063,27 +2029,18 @@ static void handle_layer(PyObject *node, CNodeCache *cache, CollectState *st,
     double ds = c_avg_scale(world);
     double rs = ds > 1.0 ? ds : 1.0;
 
-    /* Check if rebuild is needed */
-    PyObject *tex = PyObject_GetAttr(node, s__tex);
-    int dirty = read_bool(node, s__dirty);
-    double old_rscale = read_double(node, s__rscale);
-    int need_rebuild = (!tex || tex == Py_None || dirty || fabs(rs - old_rscale) > 1e-3);
-    Py_XDECREF(tex);
-
-    if (need_rebuild) {
-        /* Call node._rebuild(renderer, rs) */
-        PyObject *rs_obj = PyFloat_FromDouble(rs);
-        PyObject *result = PyObject_CallMethodObjArgs(node, s__rebuild, st->renderer, rs_obj, NULL);
-        Py_XDECREF(rs_obj);
-        Py_XDECREF(result);
-        if (state_take_render_error(st)) {
-            cache->valid = 0;
-            return;
-        }
+    /* Share clip-aware raster invalidation with Python collection. */
+    PyObject *rs_obj = PyFloat_FromDouble(rs);
+    PyObject *result = rs_obj ? PyObject_CallMethodObjArgs(node, s__prepare_cache, st->renderer, rs_obj, NULL) : NULL;
+    Py_XDECREF(rs_obj);
+    Py_XDECREF(result);
+    if (state_take_render_error(st)) {
+        cache->valid = 0;
+        return;
     }
 
     /* Read texture info after potential rebuild */
-    tex = PyObject_GetAttr(node, s__tex);
+    PyObject *tex = PyObject_GetAttr(node, s__tex);
     PyObject *lsize = PyObject_GetAttr(node, s__lsize);
     PyObject *lcenter = PyObject_GetAttr(node, s__lcenter);
 
@@ -2093,20 +2050,15 @@ static void handle_layer(PyObject *node, CNodeCache *cache, CollectState *st,
     if (tex && tex != Py_None && lsize && lsize != Py_None && lcenter && lcenter != Py_None) {
         double lw = PyFloat_AsDouble(PyTuple_GET_ITEM(lsize, 0));
         double lh = PyFloat_AsDouble(PyTuple_GET_ITEM(lsize, 1));
-        double lcx = PyFloat_AsDouble(PyTuple_GET_ITEM(lcenter, 0));
-        double lcy = PyFloat_AsDouble(PyTuple_GET_ITEM(lcenter, 1));
-        if (PyErr_Occurred()) PyErr_Clear();
-
         double wcx, wcy;
-        c_apply(world, lcx, lcy, &wcx, &wcy);
-        PyObject *capture_center = PyObject_GetAttr(node, s__capture_center);
-        if (capture_center && capture_center != Py_None &&
-            PyTuple_Check(capture_center) && PyTuple_GET_SIZE(capture_center) == 2) {
-            wcx = PyFloat_AsDouble(PyTuple_GET_ITEM(capture_center, 0));
-            wcy = PyFloat_AsDouble(PyTuple_GET_ITEM(capture_center, 1));
+        PyObject *center = PyObject_CallMethodObjArgs(node, s__texture_center, NULL);
+        if (center) PyArg_ParseTuple(center, "dd", &wcx, &wcy);
+        Py_XDECREF(center);
+        if (state_take_render_error(st)) {
+            cache->valid = 0;
+            Py_XDECREF(tex); Py_XDECREF(lsize); Py_XDECREF(lcenter);
+            return;
         }
-        Py_XDECREF(capture_center);
-        if (PyErr_Occurred()) PyErr_Clear();
         float rot = (float)c_rot(world);
 
         CCmd *cmd = &cache->cmds[0];
@@ -2252,11 +2204,18 @@ static void handle_unknown_emit(PyObject *node, CNodeCache *cache, CollectState 
 /* ─────────────────────────────────────────────────────────────────────── */
 
 static void collect_recursive(PyObject *node, const double ptf[6], double pop,
-                              CollectState *st) {
+                              CollectState *st, PyObject *parent_clips, int render_layer, PyObject *sort_scope) {
     if (st->render_error) return;
     /* Visibility check */
     if (!read_bool(node, s_visible)) return;
     if (pop <= 0.001) return;
+
+    if (node != st->root && read_bool(node, s__screen_space)) {
+        ptf = st->screen_transform;
+        render_layer = (int)read_double(node, s__screen_layer);
+        parent_clips = PyList_GET_ITEM(st->clip_contexts, 0);
+    }
+    st->fingerprint = fingerprint_mix(st->fingerprint, (unsigned long long)render_layer);
 
     st->fingerprint = fingerprint_mix(st->fingerprint, (unsigned long long)(uintptr_t)node);
 
@@ -2276,6 +2235,49 @@ static void collect_recursive(PyObject *node, const double ptf[6], double pop,
     /* Read base attributes */
     double base[7];
     read_base(node, base);
+
+    if (read_bool(node, s__stacking_context)) {
+        PyObject *suffix = Py_BuildValue("((di))", base[6], ++st->order);
+        PyObject *scope = suffix ? PySequence_Concat(sort_scope, suffix) : NULL;
+        Py_XDECREF(suffix);
+        if (!scope) { state_take_render_error(st); return; }
+        if (PyList_Append(st->sort_contexts, scope) < 0) {
+            Py_DECREF(scope); state_take_render_error(st); return;
+        }
+        sort_scope = scope;
+        Py_DECREF(scope);
+    }
+    Py_hash_t scope_hash = PyObject_Hash(sort_scope);
+    if (scope_hash == -1) { state_take_render_error(st); return; }
+    st->fingerprint = fingerprint_mix(st->fingerprint, (unsigned long long)scope_hash);
+
+    PyObject *clips = parent_clips;
+    PyObject *clip = PyObject_GetAttr(node, s__clip);
+    if (!clip) { state_take_render_error(st); return; }
+    if (clip != Py_None) {
+        double local[6], world[6];
+        c_matrix(base[0], base[1], base[2], base[3], base[4], local);
+        c_mul(ptf, local, world);
+        PyObject *transform = Py_BuildValue("(dddddd)", world[0], world[1], world[2],
+                                          world[3], world[4], world[5]);
+        clips = transform ? PyObject_CallMethodObjArgs(node, s__clip_state, transform, parent_clips, NULL) : NULL;
+        Py_XDECREF(transform);
+        if (clips) {
+            if (PyList_Append(st->clip_contexts, clips) < 0) {
+                Py_DECREF(clips);
+                clips = NULL;
+            } else Py_DECREF(clips);  /* state owns it now */
+        }
+    }
+    Py_DECREF(clip);
+    if (!clips) { state_take_render_error(st); return; }
+    if (PyObject_SetAttr(node, s__world_clips, clips) < 0) {
+        state_take_render_error(st); return;
+    }
+    Py_hash_t clip_hash = PyObject_Hash(clips);
+    if (clip_hash == -1) { state_take_render_error(st); return; }
+    st->fingerprint = fingerprint_mix(st->fingerprint, (unsigned long long)clip_hash);
+    int command_start = st->count;
 
     /* Cache comparison: base + context */
     /* For shape params, we compare on cache miss side since they differ per type */
@@ -2334,29 +2336,11 @@ static void collect_recursive(PyObject *node, const double ptf[6], double pop,
             }
             Py_XDECREF(c);
         } else if (cache->type_id == NTYPE_LABEL) {
-            PyObject *c = PyObject_GetAttr(node, s_color);
-            PyObject *t = PyObject_GetAttr(node, s_text);
-            PyObject *fo = PyObject_GetAttr(node, s_font);
-            if (c != cache->colors[0]) hit = 0;
-            /* For text, compare content not just pointer */
-            if (hit && t && cache->colors[1]) {
-                int eq = PyObject_RichCompareBool(t, cache->colors[1], Py_EQ);
-                if (eq != 1) hit = 0;
-            } else if (t != cache->colors[1]) {
-                hit = 0;
-            }
-            if (hit && fo != cache->colors[2]) {
-                int eq = (fo && cache->colors[2]) ? PyObject_RichCompareBool(fo, cache->colors[2], Py_EQ) : 0;
-                if (eq != 1) hit = 0;
-            }
-            if (hit) {
-                double fs = read_double(node, s_size);
-                double pfs = round(fs * st->screen_scale);
-                if (pfs < 10) pfs = 10;
-                double sh[2] = {fs, (double)pfs};
-                if (memcmp(sh, cache->shape, 2*sizeof(double)) != 0) hit = 0;
-            }
-            Py_XDECREF(c); Py_XDECREF(t); Py_XDECREF(fo);
+            PyObject *snap = PyObject_CallMethodObjArgs(node, s__snap, NULL);
+            int eq = snap && cache->snap_cache
+                ? PyObject_RichCompareBool(snap, cache->snap_cache, Py_EQ) : 0;
+            if (eq != 1) hit = 0;
+            Py_XDECREF(snap);
         } else if (cache->type_id == NTYPE_IMAGE) {
             PyObject *t = PyObject_GetAttr(node, s_texture);
             PyObject *isz = PyObject_GetAttr(node, s_img_size);
@@ -2412,6 +2396,7 @@ static void collect_recursive(PyObject *node, const double ptf[6], double pop,
             }
             Py_XDECREF(t); Py_XDECREF(tn);
         } else if (cache->type_id == NTYPE_SHADERNODE) {
+            if (read_bool(node, s__dirty)) hit = 0;
             PyObject *t = PyObject_GetAttr(node, s__tex);
             PyObject *ssz = PyObject_GetAttr(node, s__shader_size);
             if (t != cache->colors[0]) hit = 0;
@@ -2569,7 +2554,7 @@ static void collect_recursive(PyObject *node, const double ptf[6], double pop,
                 emit_line(node, cache, st, world, wop);
                 break;
             case NTYPE_LABEL:
-                emit_label(node, cache, st, world, wop);
+                handle_unknown_emit(node, cache, st, world, wop);
                 break;
             case NTYPE_IMAGE:
                 emit_image(node, cache, st, world, wop);
@@ -2636,7 +2621,12 @@ static void collect_recursive(PyObject *node, const double ptf[6], double pop,
                 for (int i = 0; i < cache->cmd_count; i++) {
                     CCmd *dst = state_append(st);
                     memcpy(dst, &cache->cmds[i], sizeof(CCmd));
+                    dst->clips = clips;
+                    dst->render_layer = render_layer;
+                    dst->sort_scope = sort_scope;
                 }
+                collect_layer_interactions(node, world, wop, clips, sort_scope,
+                                           render_layer, st->order, base[6], st);
                 cache->valid = 1;
                 return;
             default:
@@ -2731,33 +2721,20 @@ static void collect_recursive(PyObject *node, const double ptf[6], double pop,
                 break;
             }
             case NTYPE_LABEL: {
-                /* shape: [0]=font_size, [1]=pixel_font_size */
-                double fs = cache->shape[0];
-                c_apply(world, 0, 0, &wcx, &wcy);
-                /* Try _rendered_size, fall back to estimate */
-                PyObject *rsz = PyObject_GetAttr(node, s__rendered_size);
-                double rw = 0, rh = 0;
-                if (rsz && PyTuple_Check(rsz) && PyTuple_GET_SIZE(rsz) >= 2) {
-                    rw = PyFloat_AsDouble(PyTuple_GET_ITEM(rsz, 0));
-                    rh = PyFloat_AsDouble(PyTuple_GET_ITEM(rsz, 1));
+                PyObject *bounds = PyObject_CallMethodObjArgs(node, s__bounds, NULL);
+                if (bounds && PyTuple_Check(bounds) && PyTuple_GET_SIZE(bounds) == 4) {
+                    for (int i = 0; i < 4; ++i)
+                        cache->local_bounds[i] = PyFloat_AsDouble(PyTuple_GET_ITEM(bounds, i));
+                    c_apply(world, 0, 0, &wcx, &wcy);
+                    cache->coll_type = COLL_OBB;
+                    cache->coll[0] = wcx; cache->coll[1] = wcy;
+                    cache->coll[2] = (cache->local_bounds[2] - cache->local_bounds[0]) * sxw / 2;
+                    cache->coll[3] = (cache->local_bounds[3] - cache->local_bounds[1]) * syw / 2;
+                    cache->coll[4] = rotw;
+                    cache->has_bounds = 1;
                 }
-                Py_XDECREF(rsz);
-                if (rw <= 0 || rh <= 0) {
-                    /* Estimate from font size and text length */
-                    PyObject *txt = PyObject_GetAttr(node, s_text);
-                    Py_ssize_t tlen = (txt && PyUnicode_Check(txt)) ? PyUnicode_GET_LENGTH(txt) : 1;
-                    Py_XDECREF(txt);
-                    rw = fmax(fs * 0.6 * fmax(tlen, 1), fs * 0.6);
-                    rh = fs * 1.2;
-                }
-                if (PyErr_Occurred()) PyErr_Clear();
-                cache->coll_type = COLL_OBB;
-                cache->coll[0] = wcx; cache->coll[1] = wcy;
-                cache->coll[2] = rw * sxw / 2; cache->coll[3] = rh * syw / 2;
-                cache->coll[4] = rotw;
-                cache->local_bounds[0] = -rw/2; cache->local_bounds[1] = -rh/2;
-                cache->local_bounds[2] = rw/2;  cache->local_bounds[3] = rh/2;
-                cache->has_bounds = 1;
+                Py_XDECREF(bounds);
+                state_take_render_error(st);
                 break;
             }
             case NTYPE_IMAGE: {
@@ -2852,18 +2829,25 @@ static void collect_recursive(PyObject *node, const double ptf[6], double pop,
         cache->valid = 1;
     }
 
+    for (int i = command_start; i < st->count; ++i) {
+        st->cmds[i].clips = clips;
+        st->cmds[i].render_layer = render_layer;
+        st->cmds[i].sort_scope = sort_scope;
+    }
+
     /* Collect interactive nodes (for hit testing) — use cached bounds */
     if (node != st->root && cache->type_id != NTYPE_GROUP) {
         int is_interactive = read_bool(node, s_interactive);
         st->fingerprint = fingerprint_mix(st->fingerprint, is_interactive ? 0xa11ceULL : 0x51a7eULL);
         if (is_interactive) {
+            double input_z = read_bool(node, s__stacking_context) ? -HUGE_VAL : cache->base[6];
             if (cache->has_bounds) {
-                state_add_interactive(st, node, cache->base[6], st->order);
+                state_add_interactive(st, node, input_z, st->order, render_layer, sort_scope);
             } else if (cache->type_id == NTYPE_UNKNOWN) {
                 /* Fallback: call Python _bounds() */
                 PyObject *bounds = PyObject_CallMethodObjArgs(node, s__bounds, NULL);
                 if (bounds && bounds != Py_None) {
-                    state_add_interactive(st, node, cache->base[6], st->order);
+                    state_add_interactive(st, node, input_z, st->order, render_layer, sort_scope);
                 }
                 Py_XDECREF(bounds);
                 if (PyErr_Occurred()) PyErr_Clear();
@@ -2879,7 +2863,7 @@ static void collect_recursive(PyObject *node, const double ptf[6], double pop,
         Py_ssize_t n = PyList_GET_SIZE(children);
         st->fingerprint = fingerprint_mix(st->fingerprint, (unsigned long long)n);
         for (Py_ssize_t i = 0; i < n; i++) {
-            collect_recursive(PyList_GET_ITEM(children, i), w, wop, st);
+            collect_recursive(PyList_GET_ITEM(children, i), w, wop, st, clips, render_layer, sort_scope);
         }
     } else {
         st->fingerprint = fingerprint_mix(st->fingerprint, 0ULL);
@@ -2891,12 +2875,33 @@ static void collect_recursive(PyObject *node, const double ptf[6], double pop,
 /* Sort comparator                                                         */
 /* ─────────────────────────────────────────────────────────────────────── */
 
+static int compare_scope(PyObject *a, double az, int ao, PyObject *b, double bz, int bo) {
+    Py_ssize_t an = PyTuple_GET_SIZE(a), bn = PyTuple_GET_SIZE(b);
+    for (Py_ssize_t i = 0; i <= std::min(an, bn); ++i) {
+        double za = az, zb = bz;
+        long oa = ao, ob = bo;
+        if (i < an) {
+            PyObject *pair = PyTuple_GET_ITEM(a, i);
+            za = PyFloat_AS_DOUBLE(PyTuple_GET_ITEM(pair, 0));
+            oa = PyLong_AsLong(PyTuple_GET_ITEM(pair, 1));
+        }
+        if (i < bn) {
+            PyObject *pair = PyTuple_GET_ITEM(b, i);
+            zb = PyFloat_AS_DOUBLE(PyTuple_GET_ITEM(pair, 0));
+            ob = PyLong_AsLong(PyTuple_GET_ITEM(pair, 1));
+        }
+        if (za < zb) return -1;
+        if (za > zb) return 1;
+        if (oa != ob) return oa < ob ? -1 : 1;
+    }
+    return (an > bn) - (an < bn);
+}
+
 static int cmp_ccmd(const void *a, const void *b) {
     const CCmd *ca = (const CCmd *)a;
     const CCmd *cb = (const CCmd *)b;
-    if (ca->z < cb->z) return -1;
-    if (ca->z > cb->z) return 1;
-    return (ca->order > cb->order) - (ca->order < cb->order);
+    if (ca->render_layer != cb->render_layer) return ca->render_layer < cb->render_layer ? -1 : 1;
+    return compare_scope(ca->sort_scope, ca->z, ca->order, cb->sort_scope, cb->z, cb->order);
 }
 
 /* ─────────────────────────────────────────────────────────────────────── */
@@ -2928,7 +2933,23 @@ static PyObject *accel_collect(PyObject *self, PyObject *args) {
     CollectState st;
     @autoreleasepool {
     state_init(&st, screen_scale, renderer, root);
-    collect_recursive(root, tf, opacity, &st);
+    double identity[6] = {1, 0, 0, 1, 0, 0};
+    memcpy(st.screen_transform, identity, sizeof(identity));
+    PyObject *screen = PyObject_GetAttrString(renderer, "_screen_transform");
+    if (screen) {
+        if (!PyTuple_Check(screen) || PyTuple_GET_SIZE(screen) != 6)
+            PyErr_SetString(PyExc_ValueError, "Screen transform must be a 6-tuple.");
+        else for (int i = 0; i < 6; ++i)
+            st.screen_transform[i] = PyFloat_AsDouble(PyTuple_GET_ITEM(screen, i));
+        Py_DECREF(screen);
+        state_take_render_error(&st);
+    } else if (PyErr_ExceptionMatches(PyExc_AttributeError)) PyErr_Clear();
+    else state_take_render_error(&st);
+    PyObject *empty_clips = PyTuple_New(0);
+    if (st.clip_contexts && st.sort_contexts && empty_clips && PyList_Append(st.clip_contexts, empty_clips) == 0)
+        collect_recursive(root, tf, opacity, &st, empty_clips, 0, empty_clips);
+    else state_take_render_error(&st);
+    Py_XDECREF(empty_clips);
     }
     if (st.render_error) {
         PyObject *error = st.render_error;
@@ -2989,10 +3010,12 @@ static PyObject *accel_collect(PyObject *self, PyObject *args) {
     if (n > 0) {
         int bs = -1, pk_tex = -1;
         PyObject *pk_tobj = NULL;
+        PyObject *active_clips = NULL;
         for (int i = 0; i <= n; i++) {
             int is_mesh = (i < n && st.cmds[i].kind == KIND_MESH);
             int is_particle = (i < n && st.cmds[i].kind == KIND_PARTICLE);
-            if (is_mesh || is_particle || i == n) {
+            bool clip_change = i < n && st.cmds[i].clips != active_clips;
+            if (is_mesh || is_particle || i == n || clip_change) {
                 /* Flush pending quad batch */
                 if (bs >= 0 && pk_tex >= 0) {
                     PyObject *tex_py = pk_tobj ? pk_tobj : Py_None;
@@ -3001,6 +3024,11 @@ static PyObject *accel_collect(PyObject *self, PyObject *args) {
                     PyList_Append(batches, item);
                     Py_DECREF(item);
                     bs = -1; pk_tex = -1; pk_tobj = NULL;
+                }
+                if (clip_change) {
+                    active_clips = st.cmds[i].clips;
+                    PyObject *item = Py_BuildValue("(iOOO)", -3, active_clips, Py_False, Py_None);
+                    if (item) { PyList_Append(batches, item); Py_DECREF(item); }
                 }
                 if (is_mesh) {
                     PyObject *item = Py_BuildValue("(iiOO)", -1, st.cmds[i].mesh_batch_idx,
@@ -3015,7 +3043,8 @@ static PyObject *accel_collect(PyObject *self, PyObject *args) {
                     PyList_Append(batches, item);
                     Py_DECREF(item);
                 }
-            } else {
+            }
+            if (i < n && !is_mesh && !is_particle) {
                 /* Quad cmd */
                 int cur_tex = (st.cmds[i].kind == KIND_TEX);
                 PyObject *cur_tobj = st.cmds[i].texture;
@@ -3042,8 +3071,8 @@ static PyObject *accel_collect(PyObject *self, PyObject *args) {
             [](const void *a, const void *b) -> int {
                 auto *ea = (const InteractiveEntry *)a;
                 auto *eb = (const InteractiveEntry *)b;
-                if (ea->z != eb->z) return ea->z > eb->z ? -1 : 1;
-                return eb->order - ea->order;
+                if (ea->render_layer != eb->render_layer) return ea->render_layer > eb->render_layer ? -1 : 1;
+                return -compare_scope(ea->sort_scope, ea->z, ea->order, eb->sort_scope, eb->z, eb->order);
             });
     }
     PyObject *interactive_list = PyList_New(st.interactive_count);
@@ -3617,10 +3646,46 @@ static int c_contains_point(CNodeCache *cache, double wx, double wy) {
 /* Python: contains_point(node, wx, wy) → bool                            */
 /* ─────────────────────────────────────────────────────────────────────── */
 
+static int node_inside_clip(PyObject *node, double x, double y) {
+    PyObject *clips = PyObject_GetAttr(node, s__world_clips);
+    if (!clips) return -1;
+    if (!PyTuple_Check(clips)) {
+        Py_DECREF(clips);
+        PyErr_SetString(PyExc_TypeError, "Invalid clip context.");
+        return -1;
+    }
+    int result = 1;
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(clips); ++i) {
+        PyObject *region = PyTuple_GET_ITEM(clips, i);
+        if (!PyTuple_Check(region) || PyTuple_GET_SIZE(region) != 11) {
+            PyErr_SetString(PyExc_ValueError, "Invalid clip region.");
+            result = -1; break;
+        }
+        double v[11];
+        for (int j = 0; j < 11; ++j) v[j] = PyFloat_AsDouble(PyTuple_GET_ITEM(region, j));
+        if (PyErr_Occurred()) { result = -1; break; }
+        double px = v[0] * x + v[2] * y + v[4] - v[6];
+        double py = v[1] * x + v[3] * y + v[5] - v[7];
+        double w = v[8], h = v[9], radius = v[10];
+        double dx = fmax(fabs(px - w / 2) - (w / 2 - radius), 0);
+        double dy = fmax(fabs(py - h / 2) - (h / 2 - radius), 0);
+        if (w <= 0 || h <= 0 || !(px >= 0 && px <= w && py >= 0 && py <= h)
+                || dx * dx + dy * dy > radius * radius) {
+            result = 0; break;
+        }
+    }
+    Py_DECREF(clips);
+    return result;
+}
+
 static PyObject *accel_contains_point(PyObject *self, PyObject *args) {
     PyObject *node;
     double wx, wy;
     if (!PyArg_ParseTuple(args, "Odd", &node, &wx, &wy)) return NULL;
+
+    int inside = node_inside_clip(node, wx, wy);
+    if (inside < 0) return NULL;
+    if (!inside) Py_RETURN_FALSE;
 
     CNodeCache *cache = get_cache(node);
     if (!cache || !cache->valid) {
@@ -3657,6 +3722,9 @@ static PyObject *accel_hit_test(PyObject *self, PyObject *args) {
     Py_ssize_t n = PyList_GET_SIZE(list);
     for (Py_ssize_t i = 0; i < n; i++) {
         PyObject *node = PyList_GET_ITEM(list, i);
+        int inside = node_inside_clip(node, x, y);
+        if (inside < 0) return NULL;
+        if (!inside) continue;
         CNodeCache *cache = get_cache(node);
         int hit;
 
@@ -3698,6 +3766,9 @@ static PyObject *accel_hit_test_all(PyObject *self, PyObject *args) {
     Py_ssize_t n = PyList_GET_SIZE(list);
     for (Py_ssize_t i = 0; i < n; i++) {
         PyObject *node = PyList_GET_ITEM(list, i);
+        int inside = node_inside_clip(node, x, y);
+        if (inside < 0) { Py_DECREF(result); return NULL; }
+        if (!inside) continue;
         CNodeCache *cache = get_cache(node);
         int hit;
 

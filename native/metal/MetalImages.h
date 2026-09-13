@@ -14,6 +14,7 @@ static PyObject *metal_prepare_image_capture(PyObject *, PyObject *args) {
                 error = @"Capture requires an open scene window.";
                 return;
             }
+            if (!metalGPUAllowed(*window)) { error = metalSuspendedMessage; return; }
             if (window->frameActive || window->blitActive || window->computeActive) {
                 error = @"Capture must run between render, blit and compute passes.";
                 return;
@@ -23,11 +24,11 @@ static PyObject *metal_prepare_image_capture(PyObject *, PyObject *args) {
                 error = @"Failed to create the capture synchronization command.";
                 return;
             }
-            [command commit];
+            metalCommit(*window, command);
             window->offscreenCB = nil;
         });
         if (error) {
-            PyErr_SetString(PyExc_RuntimeError, error.UTF8String);
+            metalSetWindowError(error);
             return nullptr;
         }
         // Fence earlier use of mutable particle and shader buffers before
@@ -68,6 +69,7 @@ static PyObject *metal_read_texture_image(PyObject *, PyObject *args, PyObject *
                 error = @"Image readback requires an open window and texture.";
                 return;
             }
+            if (!metalGPUAllowed(*window)) { error = metalSuspendedMessage; return; }
             if (window->frameActive || window->blitActive || window->computeActive) {
                 error = @"End the active render, blit or compute pass before reading an image.";
                 return;
@@ -100,7 +102,7 @@ static PyObject *metal_read_texture_image(PyObject *, PyObject *args, PyObject *
             // All commands use the same queue, so the copy observes those draws.
             if (window->offscreenCB) {
                 rendered = window->offscreenCB;
-                [rendered commit];
+                metalCommit(*window, rendered);
                 window->offscreenCB = nil;
             }
             [encoder copyFromTexture:record->texture sourceSlice:0 sourceLevel:0
@@ -109,10 +111,10 @@ static PyObject *metal_read_texture_image(PyObject *, PyObject *args, PyObject *
                             toBuffer:pixels destinationOffset:0
               destinationBytesPerRow:rowBytes destinationBytesPerImage:rowBytes * height];
             [encoder endEncoding];
-            [command commit];
+            metalCommit(*window, command);
         });
         if (error) {
-            PyErr_SetString(PyExc_RuntimeError, error.UTF8String);
+            metalSetWindowError(error);
             return nullptr;
         }
         // Completion handlers may take gStateMutex or need the Python thread.

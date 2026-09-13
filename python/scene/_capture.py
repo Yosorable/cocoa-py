@@ -7,7 +7,7 @@ from collections import OrderedDict
 
 from _cocoa import _metal, _scene_accel
 
-from ._common import _matrix, _mul
+from ._common import _IDENTITY, _matrix, _mul
 from .gpu import Texture, normalize_color
 
 
@@ -114,6 +114,7 @@ def capture(node, *, rect=None, size=None, background=None):
         raise ValueError("Capture background components must be finite.")
     r, g, b, a = color
     clear_color = (r * a, g * a, b * a, a)
+    root._prepare_layout(node, update_focus=False)
     shift = _matrix((-x, -y), 0, 1)
     if is_scene:
         transform = _mul(shift, root._camera_root_transform())
@@ -128,20 +129,23 @@ def capture(node, *, rect=None, size=None, background=None):
             current = current.parent
         world = root._camera_root_transform()
         for ancestor in reversed(ancestors):
+            if ancestor._screen_space:
+                world = _IDENTITY
             world = _mul(world, _matrix(ancestor.position, ancestor.rotation, ancestor.scale))
         particle_transform = _mul(shift, _inverse(world))
 
     texture = None
-    started = completed = False
+    started = completed = suspended = False
     old_scale = renderer.screen_scale
     old_slot = renderer._active_frame_slot
     old_pool, old_used = renderer._buf_pool, renderer._buf_used
     old_text, old_atlases = renderer._tc, renderer._ga
     old_viewport = renderer._capture_viewport
+    old_screen_transform = getattr(renderer, "_screen_transform", _IDENTITY)
     states = [(child, child._world_transform, child._world_opacity,
-               getattr(child, "_rendered_size", None)) for child in _walk(node)]
+               getattr(child, "_rendered_size", None), child._world_clips) for child in _walk(node)]
     layers = [(child, child._tex, child._lsize, child._lcenter, child._rscale,
-               child._dirty, child._capture_center)
+               child._dirty, child._capture_center, child._hit_snapshot, child._cache_anchor, child._clip_basis)
               for child, *_ in states if isinstance(child, Layer)]
     path_texture_fields = ("_tex", "_path_size", "_path_center", "_rscale",
                            "_texture_version", "_texture_pixel_scale", "_texture_size")
@@ -156,6 +160,7 @@ def capture(node, *, rect=None, size=None, background=None):
     renderer._buf_pool, renderer._buf_used = [], []
     renderer._tc, renderer._ga = OrderedDict(), {}
     renderer._capture_viewport = (width, height)
+    renderer._screen_transform = shift
     try:
         _metal.prepare_image_capture(window.handle)
         started = True
@@ -173,7 +178,7 @@ def capture(node, *, rect=None, size=None, background=None):
             control._snapshot_key = None
         # Capture collection uses different transforms and may rebuild cached
         # textures. Invalidate caches rather than restoring stale texture refs.
-        for child, _, _, _ in states:
+        for child, *_ in states:
             child._drop_internal_caches(child)
         renderer.screen_scale = scale
         texture = Texture.render_target(pixel_width, pixel_height)
@@ -191,6 +196,9 @@ def capture(node, *, rect=None, size=None, background=None):
         image = texture.to_image(window)
         completed = True
         return image
+    except _metal.WindowSuspendedError:
+        suspended = True
+        raise
     finally:
         if started and not completed:
             # A failed collection can leave glyph or layer draws queued. Finish
@@ -210,12 +218,14 @@ def capture(node, *, rect=None, size=None, background=None):
                     current.close()
                 setattr(shader, name, previous)
             shader._renderer, shader._dirty = previous_renderer, dirty
-        for layer, old_texture, logical_size, center, render_scale, dirty, capture_center in layers:
+        for layer, old_texture, logical_size, center, render_scale, dirty, capture_center, hit_snapshot, cache_anchor, clip_basis in layers:
             if layer._tex is not None and layer._tex is not old_texture:
                 layer._tex.close()
             layer._tex, layer._lsize, layer._lcenter = old_texture, logical_size, center
             layer._rscale, layer._dirty = render_scale, dirty
             layer._capture_center = capture_center
+            layer._hit_snapshot = hit_snapshot
+            layer._cache_anchor, layer._clip_basis = cache_anchor, clip_basis
         for path, previous in paths:
             if path._tex is not None and path._tex is not previous[0]:
                 path._tex.close()
@@ -234,14 +244,18 @@ def capture(node, *, rect=None, size=None, background=None):
             atlas.close()
         renderer._tc, renderer._ga = old_text, old_atlases
         renderer._capture_viewport = old_viewport
+        renderer._screen_transform = old_screen_transform
         renderer._buf_pool, renderer._buf_used = old_pool, old_used
         renderer._active_frame_slot = old_slot
-        for child, world, opacity, rendered_size in states:
+        for child, world, opacity, rendered_size, clips in states:
             child._world_transform = world
             child._world_opacity = opacity
+            child._world_clips = clips
             child._drop_internal_caches(child)
             if hasattr(child, "_rendered_size"):
                 child._rendered_size = rendered_size
         renderer.screen_scale = old_scale
         renderer._capturing = False
         root._render_fingerprint = 0
+        if suspended:
+            root._invalidate_graphics()

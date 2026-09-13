@@ -211,6 +211,8 @@ class Sprite(Node):
         return (x0, y0, x0 + w, y0 + h)
 
     def contains_point(self, wx, wy):
+        if not self._inside_clip(wx, wy):
+            return False
         lx, ly = self.convert_from_world(wx, wy)
         b = self._bounds()
         return b[0] <= lx <= b[2] and b[1] <= ly <= b[3]

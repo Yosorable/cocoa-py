@@ -134,9 +134,19 @@ and editing gestures are handled by the system.
 `Scene.keyboard_frame` is `(x, y, width, height)` in window points, or `None`.
 Override `Scene.keyboard_changed(frame)` for custom layout. On macOS it is
 `None`. Set `avoid_keyboard=False` when managing your own layout. Default
-avoidance moves only the editor; for an unrotated multiline control that is too
-tall, it reduces the editing viewport while retaining font size and scrolling.
-It does not move the camera or other scene nodes.
+avoidance outside a vertical/two-axis ScrollView moves only the editor; for an
+unrotated multiline control that is too tall, it reduces the editing viewport
+while retaining font size and scrolling. It does not move the camera.
+Automatic avoidance applies immediately on keyboard appearance, frame changes,
+and dismissal. Only the system keyboard itself keeps its platform animation.
+
+Inside a vertical/two-axis ScrollView, the container manages avoidance for the
+whole content subtree. The editor follows the scene's geometry without
+an independent UIKit lift animation, preserving its size and composition.
+Keyboard dismissal immediately clamps offsets outside the new scroll range. See
+[Scene UI foundations](scene-ui.md#scrolling) for the shared layout
+contract. `avoid_keyboard=False` disables keyboard-driven reveal for that input;
+ordinary focus navigation can still reveal an offscreen node.
 
 Removing a control releases its native editor while preserving its latest text
 and selection, so it can be attached again. Reparenting within one scene preserves

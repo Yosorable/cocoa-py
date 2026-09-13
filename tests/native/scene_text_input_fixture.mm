@@ -1,6 +1,7 @@
 // Drive actual AppKit editors without exposing test hooks in the runtime.
 #include <Python.h>
 #import <AppKit/AppKit.h>
+#import <QuartzCore/QuartzCore.h>
 
 @interface NSObject (SceneTextInputFixture)
 - (NSDictionary *)state;
@@ -51,13 +52,20 @@ static PyObject *perform(PyObject *, PyObject *args) {
                 else if ([action isEqual:@"scroll"]) {
                     NSScrollView *scroll = [owner valueForKey:@"scrollView"];
                     [scroll.contentView scrollToPoint:NSMakePoint(0, start)];
-                } else if (![action isEqual:@"inspect"]) { error = @"Unknown fixture command"; return; }
+                } else if (![action isEqual:@"inspect"] && ![action isEqual:@"pointer"]) { error = @"Unknown fixture command"; return; }
                 NSMutableDictionary *state = [[owner state] mutableCopy];
                 state[@"hidden"] = @(host.hidden);
                 state[@"alpha"] = @(host.alphaValue);
                 state[@"headless"] = [owner valueForKey:@"headless"];
+                state[@"scene_managed_placement"] = [owner valueForKey:@"sceneManagedPlacement"];
                 NSPoint hitPoint = [host convertPoint:NSMakePoint(10, 10) toView:host.superview];
                 state[@"accepts_pointer"] = @([host hitTest:hitPoint] != nil);
+                if ([action isEqual:@"pointer"]) {
+                    NSPoint sample = [host convertPoint:NSMakePoint(start, count) toView:host.superview];
+                    state[@"pointer_hit"] = @([host hitTest:sample] != nil);
+                    state[@"clip_count"] = @([[owner valueForKey:@"clipPaths"] count]);
+                    state[@"has_mask"] = @(host.layer.mask != nil);
+                }
                 if ([[owner valueForKey:@"headless"] boolValue] && editor) {
                     NSRect caret = [editor firstRectForCharacterRange:NSMakeRange(0, 0) actualRange:nullptr];
                     caret = [host.window convertRectFromScreen:caret];
@@ -66,6 +74,9 @@ static PyObject *perform(PyObject *, PyObject *args) {
                     state[@"caret_rect"] = @[@(caret.origin.x), @(caret.origin.y), @(caret.size.width), @(caret.size.height)];
                 }
                 state[@"frame"] = @[@(host.frame.origin.x), @(host.frame.origin.y), @(host.frame.size.width), @(host.frame.size.height)];
+                NSView *surface = [owner valueForKey:@"surface"];
+                NSPoint center = [host convertPoint:NSMakePoint(NSMidX(host.bounds), NSMidY(host.bounds)) toView:surface];
+                state[@"center"] = @[@(center.x), @(center.y)];
                 state[@"rotation"] = @(host.frameCenterRotation);
                 state[@"first_responder"] = @(editor && host.window.firstResponder == editor);
                 state[@"can_undo"] = @(editor.undoManager.canUndo);

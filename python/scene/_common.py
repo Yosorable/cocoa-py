@@ -76,6 +76,7 @@ class Touch:
     position: tuple[float, float]
     prev_position: tuple[float, float]
     phase: TouchPhase
+    timestamp: float = 0.0
 
 # Index → TouchPhase, matching the int phase code from the native layer.
 # TouchPhase is a StrEnum so ``phase == "began"`` continues to work.
