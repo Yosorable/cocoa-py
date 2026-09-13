@@ -123,6 +123,9 @@ provide cancellation of an already-submitted change transaction.
 | `request_permission(timeout=120)` | Foreground permission status. |
 | `current(timeout=30, accuracy=10, max_age=15)` | One `Coordinates` fix, then stops updates. |
 | `watch(accuracy=10, max_age=15, distance_filter=0, capacity=128)` | Context-managed `Watch`. |
+| `heading_available()` | Whether this device provides compass headings; does not start sensors. |
+| `heading(timeout=10, max_age=5, true_north=False, orientation="portrait")` | One valid `Heading`, then stops its sensors. |
+| `watch_heading(angle_filter=1, max_age=5, true_north=False, orientation="portrait", capacity=128)` | Context-managed `HeadingWatch`. |
 | `geocode(address, timeout=30)` | A list of `Place` records from Apple. |
 | `reverse_geocode(latitude, longitude, timeout=30)` | Address records for supplied coordinates. |
 
@@ -130,6 +133,10 @@ provide cancellation of an already-submitted change transaction.
 meters, speed in m/s, course in degrees, and a Unix timestamp. Unavailable
 altitude/speed/course values are None. Requested accuracy is a preference;
 inspect `horizontal_accuracy` on each fix.
+
+`current()` chooses the newest valid fix within each delivered batch. A positive
+`max_age` limits sample age in seconds; zero rejects measurements made before
+this request starts updating, while allowing normal delivery latency.
 
 `Watch.read(timeout=1)` returns one sample or None. `stats` contains `capacity`,
 `buffered` and `dropped`. Old samples are dropped when the queue is full.
@@ -139,6 +146,15 @@ no fix before the deadline raises `TimeoutError` for `current`.
 Geocoding uses Apple's regional network service and does not read the device's
 location. Results can be ambiguous or absent. `Place` contains optional address
 components, coordinates and a time-zone name.
+
+Compass headings describe device orientation, while `Coordinates.course`
+describes movement. Magnetic mode does not request location access. Setting
+`true_north=True` also starts foreground location updates and waits for a valid
+true heading. `Heading` contains `magnetic_heading`, optional `true_heading`,
+`accuracy` in degrees, and a Unix `timestamp`. Unsupported devices, including
+native macOS, report `heading_available() == False`; starting a compass request
+then raises `NotImplementedError`. See [location and compass usage](location.md)
+for freshness, orientation, permissions and cleanup.
 
 ## Motion
 
