@@ -14,7 +14,7 @@ must not be documented as already available.
 
 See `docs/architecture.md` for the canonical source map. Python wrappers and
 shader resources live under `python/`, native implementations under `native/`.
-`tools/build_ios_wheel.py` builds a device wheel with a supplied Python.framework.
+`tools/build_ios_wheel.py` builds an arm64 device or simulator wheel with a matching Python.framework.
 `tools/install_embedded.py` supports optional source-based host integration.
 The macOS runner is a separate executable and must not enter an iOS source target.
 
@@ -64,3 +64,5 @@ link checks, without rebuilding the native extension.
 For iOS packaging, build with `tools/build_ios_wheel.py` and validate the result
 using `tests/test_ios_wheel.py` with `COCOA_PY_IOS_WHEEL` set to its path. Check
 the native platform, architecture, Python linkage, resources and RECORD hashes.
+Use `--target iphonesimulator` for arm64 simulator wheels. Keep native and shader
+targets aligned and use separate build directories for the two iOS platforms.

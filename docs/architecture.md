@@ -17,7 +17,7 @@ Pro entitlement, file-browser, or Rubicon dependency.
 - `native/common/`: shared thread/file-access helpers and embedded registration.
 - `native/runner/`: optional macOS app executable for permission-aware Python.
 - `tools/install_embedded.py`: copy Python wrappers and distribution metadata into a host bundle.
-- `tools/build_ios_wheel.py`: compile and package an arm64 iPhoneOS wheel.
+- `tools/build_ios_wheel.py`: compile and package an arm64 iOS device or simulator wheel.
 
 ## Installed layout
 

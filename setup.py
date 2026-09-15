@@ -1,8 +1,9 @@
-"""Build macOS extensions or an iPhoneOS wheel with Apple's toolchain."""
+"""Build macOS extensions or arm64 iOS device/simulator wheels."""
 
 import os
 from pathlib import Path
 import re
+import runpy
 import shutil
 import subprocess
 import sys
@@ -11,16 +12,23 @@ import sysconfig
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
 
+# PEP 517 does not put the source root on the backend's import path.
+validate_python_framework = runpy.run_path("tools/build_ios_wheel.py")["validate_python_framework"]
+
 
 ios_framework = os.environ.get("COCOA_PY_IOS_FRAMEWORK")
 is_ios = bool(ios_framework)
+ios_target = os.environ.get("COCOA_PY_IOS_TARGET", "iphoneos")
+if is_ios and ios_target not in {"iphoneos", "iphonesimulator"}:
+    raise RuntimeError("COCOA_PY_IOS_TARGET must be iphoneos or iphonesimulator.")
+target_suffix = "-simulator" if ios_target == "iphonesimulator" else ""
 minimum = "17.0" if is_ios else "14.0"
 os.environ.setdefault("MACOSX_DEPLOYMENT_TARGET", "14.0")
 architectures = set(re.findall(r"-arch\s+(\S+)", os.environ.get("ARCHFLAGS", "")))
 if is_ios:
     if architectures and architectures != {"arm64"}:
-        raise RuntimeError("iPhoneOS wheels require arm64. Remove incompatible ARCHFLAGS.")
-    wheel_platform = "ios_17_0_arm64_iphoneos"
+        raise RuntimeError("iOS wheels require arm64. Remove incompatible ARCHFLAGS.")
+    wheel_platform = f"ios_17_0_arm64_{ios_target}"
 elif architectures == {"arm64", "x86_64"}:
     wheel_platform = "macosx_14_0_universal2"
 elif len(architectures) <= 1:
@@ -33,7 +41,7 @@ else:
 class AppleBuildExt(build_ext):
     def get_ext_filename(self, name):
         if is_ios:
-            return name.replace(".", os.sep) + ".cpython-314-iphoneos.so"
+            return name.replace(".", os.sep) + f".cpython-314-{ios_target}.so"
         return super().get_ext_filename(name)
 
     def build_extensions(self):
@@ -47,7 +55,7 @@ class AppleBuildExt(build_ext):
             self.compiler.src_extensions.append(".mm")
         self.compiler.language_map[".mm"] = "c++"
         if is_ios:
-            framework = Path(ios_framework).resolve()
+            framework = validate_python_framework(Path(ios_framework), ios_target)
             headers = framework / "Headers"
             version = (headers / "patchlevel.h").read_text()
             config = (headers / "pyconfig.h").read_text()
@@ -56,11 +64,11 @@ class AppleBuildExt(build_ext):
                 raise RuntimeError("The iOS Python.framework must provide CPython 3.14 headers.")
             if re.search(r"^#define\s+Py_GIL_DISABLED\s+1\b", config, re.MULTILINE):
                 raise RuntimeError("Free-threaded iOS Python frameworks are not supported.")
-            sdk = subprocess.check_output(["xcrun", "--sdk", "iphoneos", "--show-sdk-path"], text=True).strip()
-            target_flags = ["-target", "arm64-apple-ios17.0", "-isysroot", sdk]
+            sdk = subprocess.check_output(["xcrun", "--sdk", ios_target, "--show-sdk-path"], text=True).strip()
+            target_flags = ["-target", "arm64-apple-ios17.0" + target_suffix, "-isysroot", sdk]
             # Replace host Python includes and macOS compiler/linker flags.
-            clang = [subprocess.check_output(["xcrun", "--sdk", "iphoneos", "--find", "clang"], text=True).strip()]
-            clangxx = [subprocess.check_output(["xcrun", "--sdk", "iphoneos", "--find", "clang++"], text=True).strip()]
+            clang = [subprocess.check_output(["xcrun", "--sdk", ios_target, "--find", "clang"], text=True).strip()]
+            clangxx = [subprocess.check_output(["xcrun", "--sdk", ios_target, "--find", "clang++"], text=True).strip()]
             self.compiler.set_executables(
                 compiler=clang, compiler_so=clang + ["-fPIC"],
                 compiler_cxx=clangxx, compiler_so_cxx=clangxx + ["-fPIC"],
@@ -100,11 +108,11 @@ class AppleBuildExt(build_ext):
             resources.mkdir(parents=True, exist_ok=True)
             intermediate = Path(self.build_temp) / "SceneShaders.air"
             subprocess.run([
-                "xcrun", "--sdk", "iphoneos", "metal", "-c", "-target", "air64-apple-ios17.0",
+                "xcrun", "--sdk", ios_target, "metal", "-c", "-target", "air64-apple-ios17.0" + target_suffix,
                 "python/scene/_resources/SceneShaders.metal", "-o", str(intermediate),
             ], check=True)
             subprocess.run([
-                "xcrun", "--sdk", "iphoneos", "metallib", str(intermediate),
+                "xcrun", "--sdk", ios_target, "metallib", str(intermediate),
                 "-o", str(resources / "SceneShaders.metallib"),
             ], check=True)
             # The standard CPython packager moves this SDK-wide manifest into
@@ -161,5 +169,5 @@ setup(
     ],
     cmdclass={"build_ext": AppleBuildExt},
     options={"bdist_wheel": {"plat_name": wheel_platform},
-             "build": {"build_base": "build/iphoneos-arm64" if is_ios else "build/macos"}},
+             "build": {"build_base": f"build/{ios_target}-arm64" if is_ios else "build/macos"}},
 )

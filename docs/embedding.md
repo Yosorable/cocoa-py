@@ -7,20 +7,22 @@ permission descriptions. Pythona uses this same binary integration boundary.
 
 ## Obtain or build the wheel
 
-The 0.1.0a4 iPhoneOS artifact on [PyPI](https://pypi.org/project/cocoa-py/0.1.0a4/) is
-`cocoa_py-0.1.0a4-cp314-cp314-ios_17_0_arm64_iphoneos.whl`.
+The 0.1.0a5 iPhoneOS artifact on [PyPI](https://pypi.org/project/cocoa-py/0.1.0a5/) is
+`cocoa_py-0.1.0a5-cp314-cp314-ios_17_0_arm64_iphoneos.whl`.
 It targets iOS 17+, arm64 physical devices and ordinary GIL-enabled CPython 3.14.
-It is not a macOS or simulator binary. Download the pinned release on a Mac:
+Use the separate `ios_17_0_arm64_iphonesimulator` wheel for Apple Silicon
+simulators. The CPU architecture alone does not make device and simulator
+binaries interchangeable. Download the pinned device release on a Mac:
 
 ```sh
 python3.14 -m pip download --index-url https://pypi.org/simple \
   --no-deps --only-binary=:all: --platform ios_17_0_arm64_iphoneos \
   --python-version 3.14 --implementation cp --abi cp314 \
-  --dest wheels cocoa-py==0.1.0a4
+  --dest wheels cocoa-py==0.1.0a5
 ```
 
 Record the wheel's SHA-256 and verify it when restoring the dependency. The
-release source is identified by the `v0.1.0a4` Git tag. Normal host builds can
+release source is identified by the `v0.1.0a5` Git tag. Normal host builds can
 reuse the installed files without contacting PyPI or rebuilding the library.
 
 To build from a checkout or unpacked source distribution, use CPython 3.14 on a
@@ -33,11 +35,17 @@ python3.14 tools/build_ios_wheel.py \
   --python-framework /path/to/Python.xcframework/ios-arm64/Python.framework
 ```
 
+For an arm64 simulator wheel, add `--target iphonesimulator` and supply the
+simulator Python.framework, such as
+`Python.xcframework/ios-arm64_x86_64-simulator/Python.framework`. The builder
+rejects a framework for the wrong platform before compiling. Device and simulator
+objects use separate build directories.
+
 This creates a normal wheel in `dist/` containing seven extensions, all Python
 wrappers, scene's precompiled Metal library, distribution metadata, licenses and
 the SDK privacy manifest. Box2D is compiled into the physics extension. The build
 does not include the macOS launcher or invoke a simulator. It does not require a
-Pythona checkout; any matching iPhoneOS Python.framework can be supplied.
+Pythona checkout; any matching CPython 3.14 framework can be supplied.
 
 ## Install and package
 
@@ -49,12 +57,18 @@ not select a macOS wheel:
 python3.14 -m pip install --no-deps --no-compile --only-binary=:all: \
   --platform ios_17_0_arm64_iphoneos --python-version 3.14 \
   --implementation cp --abi cp314 --target app_packages \
-  wheels/cocoa_py-0.1.0a4-cp314-cp314-ios_17_0_arm64_iphoneos.whl
+  wheels/cocoa_py-0.1.0a5-cp314-cp314-ios_17_0_arm64_iphoneos.whl
 ```
+
+For a simulator build, use `--platform ios_17_0_arm64_iphonesimulator` and the
+corresponding wheel filename instead. Prepare the host package directory for
+exactly one platform before converting extensions into frameworks.
 
 Use a fresh staging directory when upgrading, then replace the previous
 distribution's files. Hosts using Core ML must also bundle compatible NumPy 2.x
-extensions. Other modules do not require NumPy unless an array helper is used.
+extensions for the same device or simulator target. A simulator cocoa-py wheel
+does not replace that NumPy dependency. Other modules do not require NumPy
+unless an array helper is used.
 
 Process this directory with CPython's normal iOS build script, as for other
 binary Python packages. It converts each `.so` into a signed framework under

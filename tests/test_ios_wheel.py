@@ -1,4 +1,4 @@
-"""Inspect an actual iPhoneOS wheel without running an iOS simulator."""
+"""Inspect an actual arm64 iOS wheel for its declared device or simulator target."""
 
 import base64
 import csv
@@ -8,20 +8,49 @@ import io
 import os
 from pathlib import Path
 import plistlib
+import re
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+from build_ios_wheel import validate_python_framework
 
-@unittest.skipUnless(os.environ.get("COCOA_PY_IOS_WHEEL"), "Set COCOA_PY_IOS_WHEEL to validate an iPhoneOS artifact.")
+
+@unittest.skipUnless(sys.platform == "darwin", "Requires Apple's SDKs")
+class IOSBuildInputTests(unittest.TestCase):
+    def test_device_and_simulator_frameworks_are_not_interchangeable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            for target, suffix in (("iphoneos", ""), ("iphonesimulator", "-simulator")):
+                framework = Path(temporary) / target / "Python.framework"
+                headers = framework / "Headers"
+                headers.mkdir(parents=True)
+                (headers / "Python.h").touch()
+                subprocess.run([
+                    "xcrun", "--sdk", target, "clang", "-target", "arm64-apple-ios17.0" + suffix,
+                    "-dynamiclib", "-x", "c", "-", "-o", str(framework / "Python"),
+                ], input="int fixture(void) { return 1; }\n", text=True, check=True, capture_output=True)
+                self.assertEqual(validate_python_framework(framework, target), framework.resolve())
+                other = "iphoneos" if target == "iphonesimulator" else "iphonesimulator"
+                with self.assertRaisesRegex(ValueError, "must target"):
+                    validate_python_framework(framework, other)
+
+
+@unittest.skipUnless(os.environ.get("COCOA_PY_IOS_WHEEL"), "Set COCOA_PY_IOS_WHEEL to validate an iOS artifact.")
 class IOSWheelTests(unittest.TestCase):
+    def setUp(self):
+        filename = Path(os.environ["COCOA_PY_IOS_WHEEL"]).name
+        self.target = "iphonesimulator" if filename.endswith("_iphonesimulator.whl") else "iphoneos"
+        self.platform = "IOSSIMULATOR" if self.target == "iphonesimulator" else "IOS"
+
     def test_tag_resources_metadata_and_record_hashes(self):
         with zipfile.ZipFile(os.environ["COCOA_PY_IOS_WHEEL"]) as wheel:
             names = set(wheel.namelist())
             metadata = next(name.rsplit("/", 1)[0] for name in names if name.endswith(".dist-info/WHEEL"))
             info = Parser().parsestr(wheel.read(metadata + "/WHEEL").decode())
-            self.assertEqual(info.get_all("Tag"), ["cp314-cp314-ios_17_0_arm64_iphoneos"])
+            self.assertEqual(info.get_all("Tag"), [f"cp314-cp314-ios_17_0_arm64_{self.target}"])
             self.assertEqual(info["Root-Is-Purelib"], "false")
             self.assertNotIn(metadata + "/entry_points.txt", names)
             self.assertNotIn("cocoa_run.py", names)
@@ -52,7 +81,7 @@ class IOSWheelTests(unittest.TestCase):
             self.assertEqual(len(binaries), 7)
             for name in binaries:
                 with self.subTest(module=name):
-                    self.assertTrue(name.endswith(".cpython-314-iphoneos.so"))
+                    self.assertTrue(name.endswith(f".cpython-314-{self.target}.so"))
                     binary = Path(temporary) / name
                     binary.parent.mkdir(parents=True, exist_ok=True)
                     binary.write_bytes(wheel.read(name))
@@ -60,7 +89,7 @@ class IOSWheelTests(unittest.TestCase):
                         return subprocess.check_output([*command, str(binary)], text=True)
                     self.assertEqual(inspect("lipo", "-archs").strip(), "arm64")
                     build = inspect("xcrun", "vtool", "-show-build")
-                    self.assertIn("platform IOS\n", build)
+                    self.assertIn(f"platform {self.platform}\n", build)
                     self.assertRegex(build, r"minos 17\.0\b")
                     dependencies = inspect("otool", "-L")
                     self.assertIn("@rpath/Python.framework/Python", dependencies)
@@ -73,6 +102,16 @@ class IOSWheelTests(unittest.TestCase):
                     self.assertNotIn("CocoaPyEndFileAccess", imports)
                     exports = inspect("xcrun", "dyld_info", "-exports")
                     self.assertIn("_PyInit_" + module.rsplit(".", 1)[-1], exports)
+
+    def test_shader_library_matches_the_wheel_platform(self):
+        with zipfile.ZipFile(os.environ["COCOA_PY_IOS_WHEEL"]) as wheel, tempfile.TemporaryDirectory() as temporary:
+            shader = Path(wheel.extract("scene/_resources/SceneShaders.metallib", temporary))
+            strings = subprocess.check_output(["strings", str(shader)], text=True)
+            targets = set(re.findall(r"air64(?:_v\d+)?-apple-ios[\d.]+(?:-simulator)?", strings))
+            self.assertTrue(targets, "No iOS AIR target in the shader library")
+            suffix = "-simulator" if self.target == "iphonesimulator" else ""
+            self.assertTrue(all(re.fullmatch(r"air64(?:_v\d+)?-apple-ios17\.0(?:\.0)?" + suffix, target)
+                                for target in targets), targets)
 
 
 if __name__ == "__main__":
