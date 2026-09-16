@@ -28,6 +28,9 @@ def install(destination: Path):
     owned_roots = {path.name for pattern in ("*.py", "*.pyi") for path in source.glob(pattern)}
     owned_roots.update(path.name for path in source.iterdir() if path.is_dir()
                        and ((path / "__init__.py").is_file() or (path / "__init__.pyi").is_file()))
+    # Earlier releases shipped companion stubs for these wrappers.
+    owned_roots.update(name + "-stubs"
+                       for name in ("clipboard", "device", "location", "motion", "share"))
     owned_roots.add("_cocoa_support")
     emptied = set()
     # Reconcile only files owned by an earlier embedded installation. Never

@@ -10,21 +10,18 @@ import tempfile
 import unittest
 
 import _cocoa
-import clipboard
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class TypingTests(unittest.TestCase):
-    def test_generated_stubs_match_public_implementations(self):
-        result = subprocess.run([sys.executable, str(ROOT / "tools/generate_stubs.py"), "--check"],
-                                capture_output=True, text=True, timeout=15)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-    def test_installed_distribution_contains_type_information(self):
-        directory = Path(clipboard.__file__).parent
-        for module in ("device", "location", "motion", "clipboard", "share"):
-            self.assertTrue((directory / (module + "-stubs") / "__init__.pyi").is_file())
+    def test_installed_wrappers_use_inline_annotations(self):
+        for name in ("device", "location", "motion", "clipboard", "share"):
+            module = importlib.import_module(name)
+            source = Path(module.__file__)
+            self.assertEqual(source.name, name + ".py")
+            self.assertFalse(source.with_suffix(".pyi").exists())
+            self.assertFalse((source.parent / (name + "-stubs")).exists())
         self.assertTrue((Path(_cocoa.__file__).parent / "py.typed").is_file())
         self.assertTrue((Path(_cocoa.__file__).parent / "_system.pyi").is_file())
 
@@ -33,7 +30,9 @@ class TypingTests(unittest.TestCase):
             # Keep source paths and repository settings out of resolution. These
             # checks must exercise the distribution installed in this interpreter.
             config = Path(temporary) / "pyrightconfig.json"
-            config.write_text(json.dumps({"pythonVersion": "3.14", "typeCheckingMode": "strict"}))
+            # Read inline annotations from installed single-file modules.
+            config.write_text(json.dumps({"pythonVersion": "3.14", "typeCheckingMode": "strict",
+                                          "useLibraryCodeForTypes": True, "reportMissingTypeStubs": False}))
             for filename in ("system_api.py", "system_api_errors.py"):
                 source = ROOT / "tests/typecheck" / filename
                 target = Path(temporary) / filename
@@ -45,6 +44,7 @@ class TypingTests(unittest.TestCase):
                                "--pythonpath", sys.executable, "--outputjson", str(target)]
                 else:
                     command = [sys.executable, "-m", "mypy", "--strict", "--no-incremental",
+                               "--follow-untyped-imports",
                                "--python-version", "3.14", "--python-executable", sys.executable,
                                str(target)]
                 result = subprocess.run(command, cwd=temporary, capture_output=True, text=True, timeout=60)

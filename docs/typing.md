@@ -1,7 +1,10 @@
 # System module types
 
 Starting with 0.1.0a6, `device`, `location`, `motion`, `clipboard` and `share`
-provide explicit parameter types and installed companion stub packages.
+provide explicit parameter types and typed results. Their annotations live in
+the Python implementations. Version 0.1.0a7 keeps the single-file wrappers and
+omits the generated companion stubs shipped in 0.1.0a6; public imports, signatures
+and result types are unchanged.
 
 ## Records and mappings
 
@@ -70,17 +73,21 @@ type aliases; callers continue to pass ordinary strings.
 checks inputs; type annotations alone do not enforce numeric ranges or validate
 manually constructed dataclasses.
 
-## Maintaining declarations
+## Maintaining type information
 
-Inline Python annotations are the source of truth. Regenerate the companion
-`*-stubs/__init__.pyi` files after changing a public signature or result type:
+Edit the public `.py` source when changing a signature or result type. Wheels
+and source-based embedded installations include those same annotations.
+No public stub generation is needed.
 
-```sh
-python3.14 tools/generate_stubs.py
-python3.14 tools/generate_stubs.py --check
-```
+The private `_cocoa/_system.pyi` describes the compiled native bridge for internal
+type checking; it does not define a public service API.
 
-Wheels and source-based embedded installations include the same declarations.
+Type checkers must read the implementations of these installed single-file
+modules. For mypy, enable `follow_untyped_imports` or pass
+`--follow-untyped-imports`. For Pyright, enable `useLibraryCodeForTypes`; strict
+configurations can set `reportMissingTypeStubs` to `false`. Argument and result
+type checking still applies when the implementations are read.
+
 To check consumer inference and rejection of invalid calls using an installed
 build, install `mypy` and `pyright` in the development environment, then run:
 

@@ -25,7 +25,8 @@ class EmbeddedInstallerTests(unittest.TestCase):
             self.assertTrue((target / "_cocoa/py.typed").is_file())
             self.assertTrue((target / "_cocoa/_system.pyi").is_file())
             for name in ("device", "location", "motion", "share", "clipboard"):
-                self.assertTrue((target / (name + "-stubs") / "__init__.pyi").is_file())
+                self.assertTrue((target / (name + ".py")).is_file())
+                self.assertFalse((target / (name + "-stubs")).exists())
             self.assertFalse((target / "cocoa_run.py").exists())
             self.assertFalse((target / "_cocoa/_runner").exists())
             self.assertFalse(list(target.rglob("*.egg-info")))
@@ -41,6 +42,7 @@ class EmbeddedInstallerTests(unittest.TestCase):
             obsolete = target / "scene/obsolete.py"
             obsolete.write_text("old = True\n")
             obsolete_stub = target / "motion-stubs/obsolete.pyi"
+            obsolete_stub.parent.mkdir()
             obsolete_stub.write_text("old: bool\n")
             unrelated = target / "unrelated.py"
             unrelated.write_text("preserve = True\n")
@@ -55,6 +57,28 @@ class EmbeddedInstallerTests(unittest.TestCase):
             self.assertFalse(obsolete_stub.exists())
             self.assertTrue(unrelated.exists())
             self.assertTrue(outside.exists())
+
+    def test_upgrade_removes_companion_stubs_and_refreshes_module_sources(self):
+        with tempfile.TemporaryDirectory() as temporary, redirect_stdout(io.StringIO()):
+            target = Path(temporary)
+            metadata = target / "cocoa_py-0.1.0a6.dist-info"
+            metadata.mkdir()
+            old_files = []
+            for name in ("device", "location", "motion", "share", "clipboard"):
+                module = target / (name + ".py")
+                module.write_text("old = True\n")
+                stub = target / (name + "-stubs") / "__init__.pyi"
+                stub.parent.mkdir()
+                stub.write_text("old: bool\n")
+                old_files.extend((module, stub))
+            with (metadata / "RECORD").open("w", newline="") as output:
+                csv.writer(output).writerows((path.relative_to(target).as_posix(), "", "")
+                                             for path in old_files)
+            install(target)
+            for name in ("device", "location", "motion", "share", "clipboard"):
+                source = Path(__file__).parents[1] / "python" / (name + ".py")
+                self.assertEqual((target / (name + ".py")).read_bytes(), source.read_bytes())
+                self.assertFalse((target / (name + "-stubs")).exists())
 
     def test_upgrade_removes_the_previous_request_helper_package(self):
         with tempfile.TemporaryDirectory() as temporary, redirect_stdout(io.StringIO()):

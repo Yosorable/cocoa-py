@@ -60,7 +60,9 @@ class IOSWheelTests(unittest.TestCase):
             self.assertIn("_cocoa/py.typed", names)
             self.assertIn("_cocoa/_system.pyi", names)
             for module in ("device", "location", "motion", "share", "clipboard"):
-                self.assertIn(module + "-stubs/__init__.pyi", names)
+                self.assertIn(module + ".py", names)
+                self.assertNotIn(module + ".pyi", names)
+                self.assertFalse(any(name.startswith(module + "-stubs/") for name in names))
             self.assertFalse(any(name.startswith(("_cocoa_support/", "_cocoakit.")) for name in names))
             self.assertTrue(wheel.read("scene/_resources/SceneShaders.metallib").startswith(b"MTLB"))
             privacy = plistlib.loads(wheel.read("_cocoa/_system.xcprivacy"))
