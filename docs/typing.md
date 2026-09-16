@@ -1,8 +1,7 @@
 # System module types
 
-`device`, `location`, `motion`, `clipboard` and `share` provide explicit parameter
-types and installed companion stub packages. These describe the current source API;
-the previously published 0.1.0a5 wheel predates these result types.
+Starting with 0.1.0a6, `device`, `location`, `motion`, `clipboard` and `share`
+provide explicit parameter types and installed companion stub packages.
 
 ## Records and mappings
 

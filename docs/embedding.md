@@ -7,8 +7,8 @@ permission descriptions. Pythona uses this same binary integration boundary.
 
 ## Obtain or build the wheel
 
-The 0.1.0a5 iPhoneOS artifact on [PyPI](https://pypi.org/project/cocoa-py/0.1.0a5/) is
-`cocoa_py-0.1.0a5-cp314-cp314-ios_17_0_arm64_iphoneos.whl`.
+The 0.1.0a6 iPhoneOS artifact on [PyPI](https://pypi.org/project/cocoa-py/0.1.0a6/) is
+`cocoa_py-0.1.0a6-cp314-cp314-ios_17_0_arm64_iphoneos.whl`.
 It targets iOS 17+, arm64 physical devices and ordinary GIL-enabled CPython 3.14.
 Use the separate `ios_17_0_arm64_iphonesimulator` wheel for Apple Silicon
 simulators. The CPU architecture alone does not make device and simulator
@@ -18,11 +18,11 @@ binaries interchangeable. Download the pinned device release on a Mac:
 python3.14 -m pip download --index-url https://pypi.org/simple \
   --no-deps --only-binary=:all: --platform ios_17_0_arm64_iphoneos \
   --python-version 3.14 --implementation cp --abi cp314 \
-  --dest wheels cocoa-py==0.1.0a5
+  --dest wheels cocoa-py==0.1.0a6
 ```
 
 Record the wheel's SHA-256 and verify it when restoring the dependency. The
-release source is identified by the `v0.1.0a5` Git tag. Normal host builds can
+release source is identified by the `v0.1.0a6` Git tag. Normal host builds can
 reuse the installed files without contacting PyPI or rebuilding the library.
 
 To build from a checkout or unpacked source distribution, use CPython 3.14 on a
@@ -57,7 +57,7 @@ not select a macOS wheel:
 python3.14 -m pip install --no-deps --no-compile --only-binary=:all: \
   --platform ios_17_0_arm64_iphoneos --python-version 3.14 \
   --implementation cp --abi cp314 --target app_packages \
-  wheels/cocoa_py-0.1.0a5-cp314-cp314-ios_17_0_arm64_iphoneos.whl
+  wheels/cocoa_py-0.1.0a6-cp314-cp314-ios_17_0_arm64_iphoneos.whl
 ```
 
 For a simulator build, use `--platform ios_17_0_arm64_iphonesimulator` and the
