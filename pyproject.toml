@@ -41,4 +41,4 @@ where = ["python"]
 
 [tool.setuptools.package-data]
 scene = ["_resources/*.metal", "_resources/*.metallib"]
-_cocoa = ["_runner", "*.xcprivacy"]
+_cocoa = ["_runner", "*.xcprivacy", "*.pyi", "py.typed"]

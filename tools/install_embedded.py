@@ -25,8 +25,9 @@ def install(destination: Path):
             raise ValueError(f"An embedded destination path escapes site-packages: {path}")
         return path
 
-    owned_roots = {path.name for path in source.glob("*.py")}
-    owned_roots.update(path.name for path in source.iterdir() if path.is_dir() and (path / "__init__.py").is_file())
+    owned_roots = {path.name for pattern in ("*.py", "*.pyi") for path in source.glob(pattern)}
+    owned_roots.update(path.name for path in source.iterdir() if path.is_dir()
+                       and ((path / "__init__.py").is_file() or (path / "__init__.pyi").is_file()))
     owned_roots.add("_cocoa_support")
     emptied = set()
     # Reconcile only files owned by an earlier embedded installation. Never
@@ -54,7 +55,8 @@ def install(destination: Path):
     files = []
     for path in sorted(source.rglob("*")):
         relative = path.relative_to(source)
-        if not path.is_file() or path.suffix not in (".py", ".metal", ".metallib"):
+        if not path.is_file() or (path.suffix not in (".py", ".pyi", ".metal", ".metallib")
+                                  and path.name != "py.typed"):
             continue
         if any(part == "__pycache__" or part.startswith(".") or part.endswith((".egg-info", ".dist-info")) for part in relative.parts):
             continue

@@ -25,6 +25,9 @@ static PyObject *test_start(PyObject *, PyObject *args) {
     if (!PyArg_ParseTuple(args, "ss", &operation, &options)) return nullptr;
     @autoreleasepool {
         CocoaPyRequest *request = [CocoaPyRequest new];
+        NSDictionary *values = [NSJSONSerialization JSONObjectWithData:
+            [[NSString stringWithUTF8String:options] dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+        if (values[@"capacity"]) request.capacity = [values[@"capacity"] unsignedIntegerValue];
         void *pointer = (__bridge_retained void *)request;
         PyObject *capsule = PyCapsule_New(pointer, "cocoa-py.request", CocoaPyReleaseRequest);
         if (!capsule) CFBridgingRelease(pointer);
@@ -49,6 +52,22 @@ static PyObject *test_finish(PyObject *, PyObject *capsule) {
     CocoaPyRequest *request = CocoaPyGetRequest(capsule);
     if (!request) return nullptr;
     @autoreleasepool { [request finish:@42]; }
+    Py_RETURN_NONE;
+}
+
+static PyObject *test_deliver_json(PyObject *, PyObject *args) {
+    PyObject *capsule; const char *json; Py_ssize_t length; int finish = 0;
+    if (!PyArg_ParseTuple(args, "Os#|p", &capsule, &json, &length, &finish)) return nullptr;
+    CocoaPyRequest *request = CocoaPyGetRequest(capsule);
+    if (!request) return nullptr;
+    @autoreleasepool {
+        NSError *error;
+        id value = [NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:json length:length]
+                                                  options:NSJSONReadingFragmentsAllowed error:&error];
+        if (!value) { PyErr_SetString(PyExc_ValueError, error.localizedDescription.UTF8String); return nullptr; }
+        if (finish) [request finish:value];
+        else [request push:value];
+    }
     Py_RETURN_NONE;
 }
 
@@ -84,6 +103,7 @@ static PyMethodDef fixtureMethods[] = {
     {"close", system_close, METH_O, nullptr},
     {"push", test_push, METH_VARARGS, nullptr},
     {"finish", test_finish, METH_O, nullptr},
+    {"deliver_json", test_deliver_json, METH_VARARGS, nullptr},
     {"fail", test_fail, METH_O, nullptr},
     {"finish_on_main", test_finish_on_main, METH_O, nullptr},
     {"drain_signals", test_drain_signals, METH_O, nullptr},

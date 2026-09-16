@@ -2,40 +2,47 @@
 
 `motion` reads accelerometer, gyroscope, magnetometer, and fused device-motion
 data on supported iOS devices. Importing it does not start sensors or prompt.
-`available()` returns four capability flags. Native macOS returns `False` for
+`available()` returns a `MotionAvailability` record with four capability flags.
+Native macOS returns `False` for
 all four and an empty list from `reference_frames()`; starting a phone sensor
 there raises `NotImplementedError`.
 
 ```python
 import motion
 
-if motion.available()["device"]:
+if motion.available().device:
     with motion.watch(interval=0.05, capacity=1) as updates:
         sample = updates.read(timeout=3)
         if sample is not None:
-            print(sample["gravity"], sample["attitude"])
+            print(sample.gravity.z, sample.attitude.roll)
 ```
 
 ## Samples and units
 
-Samples are dictionaries, and three-dimensional vectors have `x`, `y`, and `z`
-keys. Every sample contains `timestamp`, in seconds since system boot. It is
+Samples are immutable dataclasses, and three-dimensional `Vector3` values have
+`x`, `y`, and `z` attributes. Every sample contains `timestamp`, in seconds since system boot. It is
 not a Unix timestamp and must not be compared with `time.time()`.
 
-| Sensor | Fields in addition to `timestamp` |
-| --- | --- |
-| `accelerometer` | `acceleration`: acceleration including gravity, in m/s². |
-| `gyroscope` | `rotation_rate`: angular velocity in rad/s. |
-| `magnetometer` | `magnetic_field`: raw magnetic field in microteslas, including device bias. |
-| `device` | `acceleration`, `gravity`, `rotation_rate`, `attitude`, `quaternion`, `reference_frame`, `magnetic_field`, and `magnetic_accuracy`. |
+| Sensor | Sample type | Fields in addition to `timestamp` |
+| --- | --- | --- |
+| `accelerometer` | `AccelerometerSample` | `acceleration`: acceleration including gravity, in m/s². |
+| `gyroscope` | `GyroscopeSample` | `rotation_rate`: angular velocity in rad/s. |
+| `magnetometer` | `MagnetometerSample` | `magnetic_field`: raw magnetic field in microteslas, including device bias. |
+| `device` | `DeviceMotionSample` | `acceleration`, `gravity`, `rotation_rate`, `attitude`, `quaternion`, `reference_frame`, `magnetic_field`, and `magnetic_accuracy`. |
+
+Both `watch("gyroscope")` and `Watch("gyroscope")` preserve the sample type in
+`read()` and iteration. `read()` may also return `None` on timeout. When the sensor
+is selected dynamically, `MotionSample` describes the union of all four records;
+use `isinstance(sample, motion.GyroscopeSample)` to narrow it when necessary.
+Use `dataclasses.asdict(sample)` when a dictionary is needed for serialization.
 
 For device motion:
 
 - `acceleration` is user acceleration with gravity removed, in m/s². It differs
   from the raw accelerometer's field with the same name. `gravity` is the gravity
   vector, also in m/s². Both come from Core Motion's sensor fusion.
-- `rotation_rate` uses rad/s. `attitude` contains `roll`, `pitch`, and `yaw` in
-  radians, as supplied by `CMAttitude`. `quaternion` has `x`, `y`, `z`, and `w`
+- `rotation_rate` uses rad/s. `attitude` is an `Attitude` record with `roll`, `pitch`, and `yaw` in
+  radians, as supplied by `CMAttitude`. `quaternion` is a `Quaternion` with `x`, `y`, `z`, and `w`
   components. Euler angles can wrap; use the quaternion for continuous rotations.
 - `reference_frame` identifies the reference selected for the device-motion
   service. It describes attitude, not a rotation applied to every returned vector.
@@ -52,7 +59,7 @@ Required measurements with non-finite values, invalid timestamps, or a missing
 attitude are discarded. Invalid optional magnetic data does not discard an
 otherwise valid attitude sample. Repeated or older timestamps within one
 native sensor session are also discarded. These omissions do not increment
-`stats["dropped"]`, which counts buffer overflow only.
+`stats.dropped`, which counts buffer overflow only.
 
 ## Timing and multiple watches
 
@@ -74,7 +81,8 @@ to be synchronized; use `device` motion for a fused snapshot.
 
 `read(timeout=1)` returns the oldest buffered sample, or `None` when the wait
 expires. A read timeout leaves the stream running. A full buffer discards its
-oldest sample and increments `stats["dropped"]`. Use `capacity=1` for controls
+oldest sample and increments `stats.dropped`. `stats` is a `StreamStats` record
+with `capacity`, `buffered` and `dropped` attributes. Use `capacity=1` for controls
 that need the most recent buffered reading instead of a history.
 
 Closing a watch clears its buffer and unsubscribes it. Only closing the last
@@ -101,7 +109,7 @@ if "magnetic_north" in motion.reference_frames():
     with motion.watch(reference_frame="magnetic_north") as updates:
         sample = updates.read(timeout=5)
         if sample is not None:
-            print(sample["reference_frame"], sample["magnetic_accuracy"])
+            print(sample.reference_frame, sample.magnetic_accuracy)
 ```
 
 All simultaneous device-motion watches must request the same frame. A conflicting

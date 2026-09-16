@@ -92,6 +92,7 @@ and lifecycle integration; see [iOS embedding](https://github.com/Yosorable/coco
 ## Documentation
 
 - [Module API guide](https://github.com/Yosorable/cocoa-py/blob/main/docs/api.md)
+- [System module types](https://github.com/Yosorable/cocoa-py/blob/main/docs/typing.md)
 - [macOS execution and permissions](https://github.com/Yosorable/cocoa-py/blob/main/docs/macos.md)
 - [Embedding in an iOS application](https://github.com/Yosorable/cocoa-py/blob/main/docs/embedding.md)
 - [Architecture and resource ownership](https://github.com/Yosorable/cocoa-py/blob/main/docs/architecture.md)

@@ -1,5 +1,5 @@
 recursive-include native *.h *.mm *.c *.plist *.xcprivacy LICENSE
-recursive-include python *.py *.metal *.metallib
+recursive-include python *.py *.pyi py.typed *.metal *.metallib
 recursive-include tests *.py *.zip *.mm
 recursive-include docs *.md
 recursive-include tools *.py

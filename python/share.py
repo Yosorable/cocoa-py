@@ -6,11 +6,14 @@ is imported only when converting a Pillow object.
 """
 
 import os
-from collections.abc import Mapping
+from collections.abc import Buffer, Iterable, Mapping
 from dataclasses import dataclass
+from typing import cast
+
+from _cocoa._types import ImageInput as ImageInput, PathInput as PathInput
 from _cocoa.requests import Request, seconds
 
-__all__ = ["ShareResult", "ShareRequest", "open", "present"]
+__all__ = ["ImageInput", "PathInput", "ShareResult", "ShareRequest", "open", "present"]
 
 
 @dataclass(frozen=True)
@@ -26,7 +29,7 @@ class ShareResult:
     activity: str | None
 
 
-class ShareRequest(Request):
+class ShareRequest(Request[ShareResult]):
     """A sharing window with wait, done, and close methods.
 
     On macOS, click Share in the window to open the system service picker.
@@ -36,7 +39,9 @@ class ShareRequest(Request):
     and temporary attachments remain available until that dismissal finishes.
     """
 
-    def __init__(self, *, text=None, files=(), urls=(), images=(), attachments=None):
+    def __init__(self, *, text: str | None = None, files: Iterable[PathInput] = (),
+                 urls: Iterable[str] = (), images: Iterable[ImageInput] = (),
+                 attachments: Mapping[str, Buffer] | None = None) -> None:
         if isinstance(files, (str, bytes, os.PathLike)) or isinstance(urls, str):
             raise TypeError("files and urls must be sequences of individual items")
         if isinstance(images, (str, bytes, bytearray, memoryview, os.PathLike)):
@@ -50,9 +55,9 @@ class ShareRequest(Request):
                          lambda value: ShareResult(**value), _buffers=buffers)
 
 
-def _image_buffer(image):
+def _image_buffer(image: ImageInput) -> Buffer:
     try:
-        view = memoryview(image)
+        view = memoryview(cast(Buffer, image))
     except TypeError:
         if not any(cls.__module__.startswith("PIL.") for cls in type(image).__mro__):
             raise TypeError("Each image must be a Pillow Image or an encoded image buffer") from None
@@ -72,10 +77,12 @@ def _image_buffer(image):
         with view:
             if not view.c_contiguous:
                 raise BufferError("Image buffers must be C-contiguous")
-        return image
+        return cast(Buffer, image)
 
 
-def open(*, text=None, files=(), urls=(), images=(), attachments=None) -> ShareRequest:
+def open(*, text: str | None = None, files: Iterable[PathInput] = (),
+         urls: Iterable[str] = (), images: Iterable[ImageInput] = (),
+         attachments: Mapping[str, Buffer] | None = None) -> ShareRequest:
     """Open a share window without waiting. Retain and explicitly close it.
 
     files contains local paths; urls contains absolute non-file URLs. images
@@ -100,7 +107,10 @@ def open(*, text=None, files=(), urls=(), images=(), attachments=None) -> ShareR
     return ShareRequest(text=text, files=files, urls=urls, images=images, attachments=attachments)
 
 
-def present(*, text=None, files=(), urls=(), images=(), attachments=None, timeout=300) -> ShareResult:
+def present(*, text: str | None = None, files: Iterable[PathInput] = (),
+            urls: Iterable[str] = (), images: Iterable[ImageInput] = (),
+            attachments: Mapping[str, Buffer] | None = None,
+            timeout: float | None = 300) -> ShareResult:
     """Wait for sharing or cancellation; raise TimeoutError when time runs out.
 
     Content arguments are the same as open(). User cancellation returns

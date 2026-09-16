@@ -14,6 +14,9 @@ import time
 import unittest
 from unittest.mock import patch
 
+import device
+import location
+import motion
 from _cocoa import requests
 
 
@@ -83,12 +86,12 @@ class NativeRequestTests(unittest.TestCase):
         for value in range(1000):
             self.fixture.push(stream._handle, value)
             self.assertEqual(stream.read(0), value)
-        self.assertEqual(stream.stats["buffered"], 0)
+        self.assertEqual(stream.stats.buffered, 0)
         self.assertEqual(self.fixture.drain_signals(stream._handle), 0)
         self.fixture.push(stream._handle, 1)
         self.fixture.push(stream._handle, 2)
         self.assertEqual(stream.read(0), 1)
-        self.assertEqual(stream.stats["buffered"], 1)
+        self.assertEqual(stream.stats.buffered, 1)
         self.assertEqual(stream.read(0), 2)
         self.assertEqual(self.fixture.drain_signals(stream._handle), 0)
 
@@ -189,8 +192,87 @@ class NativeRequestTests(unittest.TestCase):
         self.assertTrue(done.wait(1))
         thread.join(1)
         self.assertEqual(errors, [])
-        self.assertEqual(stream.stats["buffered"], 0)
+        self.assertEqual(stream.stats.buffered, 0)
         self.assertEqual(self.fixture.drain_signals(stream._handle), 0)
+
+    def test_device_and_location_results_preserve_platform_states(self):
+        native_start = self.fixture.start
+        cases = [
+            (device.battery, {"level": None, "state": "unavailable"}, device.BatteryInfo(None, "unavailable")),
+            (device.battery, {"level": 0.8, "state": "not_charging"}, device.BatteryInfo(0.8, "not_charging")),
+            (device.battery, {"level": None, "state": "unknown"}, device.BatteryInfo(None, "unknown")),
+            (location.status, {"permission": "restricted", "enabled": False, "precise": False},
+             location.LocationStatus("restricted", False, False)),
+        ]
+        for function, payload, expected in cases:
+            with self.subTest(function=function.__name__, payload=payload):
+                handles = []
+
+                def start(operation, options):
+                    handle = native_start(operation, options)
+                    handles.append(handle)
+                    self.fixture.deliver_json(handle, json.dumps(payload), True)
+                    return handle
+
+                with patch.object(self.fixture, "start", side_effect=start):
+                    result = function()
+                self.assertIs(type(result), type(expected))
+                self.assertEqual(result, expected)
+                self.assertTrue(json.loads(self.fixture.poll(handles[0], 0, False))["closed"])
+
+    def test_location_streams_preserve_optional_measurements_and_queue_stats(self):
+        position = dict(latitude=31.2, longitude=121.5, altitude=None, horizontal_accuracy=4.5,
+                        vertical_accuracy=None, speed=None, course=None, timestamp=1234567890.5)
+        heading = dict(magnetic_heading=123.0, true_heading=None, accuracy=5.0, timestamp=1234567890.5)
+        for factory, payload, expected in (
+            (location.watch, position, location.Coordinates(**position)),
+            (location.watch_heading, heading, location.Heading(**heading)),
+        ):
+            with self.subTest(factory=factory.__name__), factory(capacity=4) as updates:
+                self.fixture.deliver_json(updates._handle, json.dumps(payload))
+                self.assertEqual(updates.stats, location.StreamStats(4, 1, 0))
+                self.assertEqual(updates.read(0), expected)
+                self.assertIsNone(updates.read(0))
+                self.assertEqual(updates.stats.buffered, 0)
+                self.fixture.deliver_json(updates._handle, json.dumps(payload))
+                self.assertEqual(next(iter(updates)), expected)
+            self.assertTrue(updates.closed)
+
+    def test_motion_streams_convert_each_sensor_and_nested_values(self):
+        vector = dict(x=1.25, y=-2.5, z=3.75)
+        cases = [
+            ("accelerometer", {"acceleration": vector}, motion.AccelerometerSample, "acceleration"),
+            ("gyroscope", {"rotation_rate": vector}, motion.GyroscopeSample, "rotation_rate"),
+            ("magnetometer", {"magnetic_field": vector}, motion.MagnetometerSample, "magnetic_field"),
+        ]
+        for sensor, fields, kind, attribute in cases:
+            with self.subTest(sensor=sensor), motion.watch(sensor) as updates:
+                self.fixture.deliver_json(updates._handle, json.dumps(dict(timestamp=42.5, **fields)))
+                sample = updates.read(0)
+                self.assertIsInstance(sample, kind)
+                self.assertEqual(sample.timestamp, 42.5)
+                self.assertEqual(getattr(sample, attribute), motion.Vector3(1.25, -2.5, 3.75))
+                self.assertIsNone(updates.read(0))
+
+        payload = dict(timestamp=42.5, acceleration=vector, gravity=dict(x=0, y=0, z=-9.80665),
+                       rotation_rate=dict(x=0.1, y=0.2, z=0.3), attitude=dict(roll=0.5, pitch=-0.2, yaw=0.4),
+                       quaternion=dict(x=0, y=0, z=0, w=1), reference_frame="magnetic_north",
+                       magnetic_field=None, magnetic_accuracy="uncalibrated")
+        with motion.Watch(reference_frame="magnetic_north") as updates:
+            for field, accuracy in ((None, "uncalibrated"), (vector, "high")):
+                payload.update(magnetic_field=field, magnetic_accuracy=accuracy)
+                self.fixture.deliver_json(updates._handle, json.dumps(payload))
+                sample = next(iter(updates))
+                self.assertIsInstance(sample, motion.DeviceMotionSample)
+                self.assertEqual(sample.attitude, motion.Attitude(0.5, -0.2, 0.4))
+                self.assertEqual(sample.quaternion.w, 1)
+                self.assertEqual(sample.gravity.z, -9.80665)
+                self.assertEqual(sample.reference_frame, "magnetic_north")
+                self.assertEqual(sample.magnetic_accuracy, accuracy)
+                if field is None:
+                    self.assertIsNone(sample.magnetic_field)
+                else:
+                    self.assertEqual(sample.magnetic_field, motion.Vector3(1.25, -2.5, 3.75))
 
 
 if __name__ == "__main__":

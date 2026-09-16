@@ -155,7 +155,7 @@ class MotionTests(unittest.TestCase):
                 _system.close(handle)
 
     def test_desktop_reports_no_phone_sensors_or_reference_frames(self):
-        self.assertFalse(any(motion.available().values()))
+        self.assertEqual(motion.available(), motion.MotionAvailability(False, False, False, False))
         self.assertEqual(motion.reference_frames(), [])
         with self.assertRaises(NotImplementedError):
             motion.watch()

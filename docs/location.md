@@ -4,6 +4,10 @@
 streams, and Apple's network geocoder. Importing the module does not start
 sensors or request permission. `status()` and `heading_available()` are queries.
 
+`status()` returns an immutable `LocationStatus` with `permission`, `enabled`
+and `precise` attributes. `permission()` returns just the permission string.
+An enabled service and authorized permission do not guarantee a usable fix.
+
 ## Position and freshness
 
 ```python
@@ -103,7 +107,8 @@ left; landscape right places it on the right.
 Both watch classes use the common `read(timeout)`, `stats`, and `close()`
 contract. A read timeout returns `None` and leaves the watch active. Capacity
 is an integer from 1 through 4096; a full queue drops its oldest sample and
-increments `stats["dropped"]`. Use a context manager to stop all sensors when
+increments `stats.dropped`. `stats` is an immutable `StreamStats` snapshot with
+`capacity`, `buffered` and `dropped` attributes. Use a context manager to stop all sensors when
 leaving a loop. Closing also clears queued samples and detaches the native
 manager so late callbacks cannot enqueue more data.
 
@@ -136,7 +141,7 @@ later requires a new request after the failed one has been closed. When a
 running request loses authorization, it stops updates and reports the error.
 Queries do not bypass an app's usage-description or authorization requirements.
 
-Reduced Accuracy is supported: `status()["precise"]` is `False`, and fixes carry
+Reduced Accuracy is supported: `status().precise` is `False`, and fixes carry
 the actual `horizontal_accuracy`. Requesting a small `accuracy` does not upgrade
 authorization. Coarse fixes can be less frequent, so a strict `max_age` may
 cause a timeout. The library does not request temporary Full Accuracy access.

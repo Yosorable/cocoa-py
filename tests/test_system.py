@@ -23,16 +23,19 @@ class SystemTests(unittest.TestCase):
 
     def test_native_device_and_storage_values(self):
         info = device.info()
-        self.assertEqual(info["platform"], "macos")
-        self.assertGreater(info["physical_memory"], 0)
-        self.assertGreaterEqual(info["cpu_count"], info["active_cpu_count"])
-        self.assertGreater(info["uptime"], 0)
+        self.assertIsInstance(info, device.DeviceInfo)
+        self.assertEqual(info.platform, "macos")
+        self.assertGreater(info.physical_memory, 0)
+        self.assertGreaterEqual(info.cpu_count, info.active_cpu_count)
+        self.assertGreater(info.uptime, 0)
         storage = device.storage(Path.cwd())
-        self.assertGreater(storage["total"], storage["free"])
-        self.assertGreaterEqual(storage["free"], 0)
+        self.assertIsInstance(storage, device.StorageInfo)
+        self.assertGreater(storage.total, storage.free)
+        self.assertGreaterEqual(storage.free, 0)
         battery = device.battery()
-        if battery["level"] is not None:
-            self.assertTrue(0 <= battery["level"] <= 1)
+        self.assertIsInstance(battery, device.BatteryInfo)
+        if battery.level is not None:
+            self.assertTrue(0 <= battery.level <= 1)
 
     def test_native_request_lifecycle(self):
         with Request("device.info", {}) as request:
@@ -46,7 +49,7 @@ class SystemTests(unittest.TestCase):
             request.wait(0)
 
     def test_unavailable_desktop_motion_reports_capability_and_error(self):
-        self.assertFalse(any(motion.available().values()))
+        self.assertEqual(motion.available(), motion.MotionAvailability(False, False, False, False))
         with self.assertRaises(NotImplementedError):
             motion.watch()
 
@@ -58,6 +61,10 @@ class SystemTests(unittest.TestCase):
             location.geocode("")
 
     def test_location_permission_can_be_queried_without_prompting(self):
+        status = location.status()
+        self.assertIsInstance(status, location.LocationStatus)
+        self.assertIsInstance(status.enabled, bool)
+        self.assertIsInstance(status.precise, bool)
         self.assertIn(location.permission(), ("authorized", "not_determined", "denied", "restricted"))
 
     def test_missing_shared_file_fails_before_presenting_ui(self):
@@ -85,7 +92,7 @@ class LauncherTests(unittest.TestCase):
         result = subprocess.run([
             sys.executable, "-m", "cocoa_run", "-c",
             "import json,sys,device; "
-            "print(json.dumps({'prefix':sys.prefix,'executable':sys.executable,'platform':device.info()['platform']}))",
+            "print(json.dumps({'prefix':sys.prefix,'executable':sys.executable,'platform':device.info().platform}))",
         ], capture_output=True, text=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
         values = json.loads(result.stdout)

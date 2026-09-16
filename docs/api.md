@@ -124,7 +124,7 @@ provide cancellation of an already-submitted change transaction.
 
 | API | Result |
 | --- | --- |
-| `status()` / `permission()` | Current authorization without prompting. |
+| `status()` / `permission()` | `LocationStatus` / permission string, without prompting. |
 | `request_permission(timeout=120)` | Foreground permission status. |
 | `current(timeout=30, accuracy=10, max_age=15)` | One `Coordinates` fix, then stops updates. |
 | `watch(accuracy=10, max_age=15, distance_filter=0, capacity=128)` | Context-managed `Watch`. |
@@ -143,8 +143,12 @@ inspect `horizontal_accuracy` on each fix.
 `max_age` limits sample age in seconds; zero rejects measurements made before
 this request starts updating, while allowing normal delivery latency.
 
-`Watch.read(timeout=1)` returns one sample or None. `stats` contains `capacity`,
-`buffered` and `dropped`. Old samples are dropped when the queue is full.
+`status()` returns an immutable `LocationStatus` with `permission`, `enabled`
+and `precise` attributes. It does not guarantee a usable fix.
+
+`Watch.read(timeout=1)` returns one sample or None. `stats` is an immutable
+`StreamStats` with `capacity`, `buffered` and `dropped` attributes. Old samples
+are dropped when the queue is full.
 Close the watch to stop updates. Permission refusal raises `PermissionError`;
 no fix before the deadline raises `TimeoutError` for `current`.
 
@@ -163,14 +167,18 @@ for freshness, orientation, permissions and cleanup.
 
 ## Motion
 
-`available()` reports support for `accelerometer`, `gyroscope`, `magnetometer`
-and fused `device` motion. `watch(sensor="device", interval=1/60, capacity=128)`
+`available()` returns `MotionAvailability` with boolean `accelerometer`,
+`gyroscope`, `magnetometer` and fused `device` attributes.
+`watch(sensor="device", interval=1/60, capacity=128, reference_frame=None)`
 returns a context-managed stream with the same read/stats/close contract as
 location. Intervals range from 0.01 through 1 second; device delivery is best
 effort. Multiple watches share one native manager, with independent bounded
 buffers and delivery intervals. Closing one watch does not stop other watches.
 
-Samples are dictionaries. Acceleration and gravity use m/s², rotation uses rad/s,
+Samples are immutable `AccelerometerSample`, `GyroscopeSample`,
+`MagnetometerSample` or `DeviceMotionSample` records, according to the sensor.
+Vectors are `Vector3` records with `x`, `y`, `z` attributes; orientation uses
+`Attitude` and `Quaternion`. Acceleration and gravity use m/s², rotation uses rad/s,
 magnetic fields use microteslas, attitude angles use radians, and timestamps use
 seconds since system boot. Device motion also provides an orientation quaternion,
 `reference_frame`, optional calibrated `magnetic_field`, and `magnetic_accuracy`.
@@ -239,7 +247,14 @@ See the [sharing guide](sharing.md) for data formats, ownership and examples.
 
 ## Device
 
-`info()` returns platform, OS version, architecture, CPU counts, physical memory
-(bytes), uptime (seconds), low-power mode and thermal state. `battery()` returns
-level (0..1 or None) and charging state. `storage(path=".")` returns total/free
-filesystem bytes. No persistent device identifier is returned.
+`info()` returns an immutable `DeviceInfo` with `platform`, `system_version`,
+`machine`, `cpu_count`, `active_cpu_count`, `physical_memory` (bytes), `uptime`
+(seconds), `low_power` and `thermal_state` attributes.
+`battery()` returns `BatteryInfo(level, state)`; level is 0..1 or None. States
+include `charging`, `full`, `unplugged`, `unknown`, `unavailable` and macOS
+`not_charging`. Desktops without a battery report `level=None` and
+`state="unavailable"`. `storage(path=".")` returns `StorageInfo(total, free)`
+in filesystem bytes. No persistent device identifier is returned.
+
+See [system module types](typing.md) for result fields, static checking and
+conversion of records to dictionaries.

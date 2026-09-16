@@ -71,3 +71,29 @@ class ImportTests(unittest.TestCase):
                 assert name not in sys.modules
                 assert importlib.util.find_spec(name) is None, name
         """)
+
+    def test_system_type_annotations_do_not_require_optional_image_libraries(self):
+        self.run_python("""
+            import importlib.abc
+            import inspect
+            import pydoc
+            import sys
+
+            class BlockOptional(importlib.abc.MetaPathFinder):
+                def find_spec(self, fullname, path=None, target=None):
+                    if fullname.split('.')[0] in {'PIL', 'numpy', 'matplotlib'}:
+                        raise AssertionError('Unexpected optional import: ' + fullname)
+
+            sys.meta_path.insert(0, BlockOptional())
+            import clipboard, device, location, motion, share
+            for module in (clipboard, device, location, motion, share):
+                pydoc.render_doc(module)
+                for name in module.__all__:
+                    value = getattr(module, name)
+                    if inspect.isfunction(value) or inspect.isclass(value):
+                        inspect.signature(value)
+            for factory in (location.watch, location.watch_heading, motion.watch):
+                assert all(parameter.kind != inspect.Parameter.VAR_KEYWORD
+                           for parameter in inspect.signature(factory).parameters.values())
+            assert 'PIL' not in sys.modules and 'numpy' not in sys.modules
+        """)

@@ -22,6 +22,10 @@ class EmbeddedInstallerTests(unittest.TestCase):
             self.assertTrue((target / "scene/_resources/SceneShaders.metal").is_file())
             self.assertTrue((target / "_cocoa/__init__.py").is_file())
             self.assertTrue((target / "_cocoa/requests.py").is_file())
+            self.assertTrue((target / "_cocoa/py.typed").is_file())
+            self.assertTrue((target / "_cocoa/_system.pyi").is_file())
+            for name in ("device", "location", "motion", "share", "clipboard"):
+                self.assertTrue((target / (name + "-stubs") / "__init__.pyi").is_file())
             self.assertFalse((target / "cocoa_run.py").exists())
             self.assertFalse((target / "_cocoa/_runner").exists())
             self.assertFalse(list(target.rglob("*.egg-info")))
@@ -36,15 +40,19 @@ class EmbeddedInstallerTests(unittest.TestCase):
             metadata = next(target.glob("cocoa_py-*.dist-info"))
             obsolete = target / "scene/obsolete.py"
             obsolete.write_text("old = True\n")
+            obsolete_stub = target / "motion-stubs/obsolete.pyi"
+            obsolete_stub.write_text("old: bool\n")
             unrelated = target / "unrelated.py"
             unrelated.write_text("preserve = True\n")
             outside = Path(temporary) / "outside.py"
             outside.write_text("preserve = True\n")
             with (metadata / "RECORD").open("a", newline="") as output:
                 writer = csv.writer(output)
-                writer.writerows([("scene/obsolete.py", "", ""), ("unrelated.py", "", ""), ("../outside.py", "", "")])
+                writer.writerows([("scene/obsolete.py", "", ""), ("motion-stubs/obsolete.pyi", "", ""),
+                                  ("unrelated.py", "", ""), ("../outside.py", "", "")])
             install(target)
             self.assertFalse(obsolete.exists())
+            self.assertFalse(obsolete_stub.exists())
             self.assertTrue(unrelated.exists())
             self.assertTrue(outside.exists())
 
