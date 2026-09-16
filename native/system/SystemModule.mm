@@ -6,14 +6,12 @@
 #include "ClipboardBridge.h"
 #include "Location.h"
 #include "Motion.h"
-#include "Notification.h"
 #include "Share.h"
 #include "ShareBridge.h"
 
 static CocoaPyRequest *CocoaPyStart(NSString *name, NSDictionary *args) {
     if ([name hasPrefix:@"location."]) return CocoaPyLocation(name, args);
     if ([name hasPrefix:@"motion."]) return CocoaPyMotion(name, args);
-    if ([name hasPrefix:@"notification."]) return CocoaPyNotification(name, args);
     if ([name hasPrefix:@"share."]) return CocoaPyShare(name, args);
     if ([name hasPrefix:@"device."]) return CocoaPyDevice(name, args);
     return CocoaPyFailure(@"value", @"Unknown system operation.");

@@ -8,7 +8,7 @@ and have not been validated on Intel hardware.
 ## Ordinary Python and the permission launcher
 
 Offline audio, Core ML and scene windows work from an ordinary terminal Python
-process. Microphone, Photos, location and notifications depend on the identity
+process. Microphone, Photos and location depend on the identity
 and Info.plist of the actual process. An interpreter supplied inside an app may
 already provide these; a bare executable may not.
 
@@ -64,11 +64,6 @@ its own app after Python times out.
 - Location quality depends on available hardware and system settings; a Mac does
   not imply GPS-quality fixes. Inspect each fix's reported accuracy.
 - Geocoder results depend on Apple's service, region and network availability.
-- Notifications require an app identity. The library schedules local notices
-  and does not replace a host application's notification delegate. The optional
-  launcher owns its delegate and supports foreground banners/list entries and
-  the per-notice `foreground` preference. Other hosts can adopt the same
-  [notification policy](notifications.md#host-integration).
 
 No module collects analytics or forwards user data to a cocoa-py server.
 Geocoding uses Apple's service; sharing sends only the items and destination the

@@ -36,7 +36,7 @@ class ImportTests(unittest.TestCase):
             "import coreml": set(),
         }
         cases.update({"import " + name: {"_cocoa._system"} for name in (
-            "location", "motion", "clipboard", "device", "share", "notification",
+            "location", "motion", "clipboard", "device", "share",
         )})
         for statement, expected in cases.items():
             with self.subTest(statement=statement):

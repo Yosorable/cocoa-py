@@ -13,7 +13,7 @@ Pro entitlement, file-browser, or Rubicon dependency.
 - `native/scene/`: scene acceleration; shaders live in `python/scene/_resources/`.
 - `native/physics/`: Box2D bridge and vendored Box2D C sources.
 - `native/photos/`: system photo picker and Photos saving.
-- `native/system/`: location, motion, clipboard, device, sharing and notifications.
+- `native/system/`: location, motion, clipboard, device and sharing.
 - `native/common/`: shared thread/file-access helpers and embedded registration.
 - `native/runner/`: optional macOS app executable for permission-aware Python.
 - `tools/install_embedded.py`: copy Python wrappers and distribution metadata into a host bundle.
@@ -114,8 +114,7 @@ interpreter or alter the user's package installation.
 ## Boundaries of this preview
 
 Native macOS does not provide the iPhone motion sensors. Location remains a
-foreground service. Notification activation and foreground presentation remain
-host responsibilities. The project does not implement a general UI toolkit,
+foreground service. The project does not implement a general UI toolkit,
 contacts/reminders, Bluetooth, speech, or Pythonista API compatibility.
 
 The original `0.1.0a1` release contained Core ML only; its historical release

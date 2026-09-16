@@ -243,31 +243,3 @@ See the [sharing guide](sharing.md) for data formats, ownership and examples.
 (bytes), uptime (seconds), low-power mode and thermal state. `battery()` returns
 level (0..1 or None) and charging state. `storage(path=".")` returns total/free
 filesystem bytes. No persistent device identifier is returned.
-
-## Local notifications
-
-`available()` checks host identity; `permission()` reads status and
-`request_permission(timeout=120)` prompts. Then:
-
-```python
-import notification
-
-if notification.request_permission() in {"authorized", "provisional"}:
-    identifier = notification.schedule("Timer", "Your timer finished", delay=60)
-    print(notification.pending())
-    notification.cancel(identifier)
-```
-
-`schedule()` accepts an immediate/delayed trigger, a timezone-aware `at` datetime,
-or a repeating `CalendarTrigger` for daily/weekly wall-clock times. Content
-includes title, subtitle, body, default sound or silence, and a foreground
-presentation preference. Reusing an identifier replaces its pending notice.
-
-`settings()` queries individual authorization settings. `pending()` and
-`delivered()` list library notices; `cancel_pending()` and `remove_delivered()`
-manage those sets independently. The existing `cancel(id)` and `cancel_all()`
-retain their behavior. Other host notices are preserved.
-
-See [Local notifications](notifications.md) for signatures, result schemas,
-calendar examples and foreground delegate integration. The optional macOS
-launcher implements that integration; other hosts own their delegate policy.

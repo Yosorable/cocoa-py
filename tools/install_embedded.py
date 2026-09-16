@@ -77,7 +77,7 @@ def install(destination: Path):
         "Native extensions are linked into the host and registered as built-in modules.\n"
     )
     (metadata / "INSTALLER").write_text("cocoa-py embedded installer\n")
-    (metadata / "top_level.txt").write_text("_cocoa\naudio\nclipboard\ncoreml\ndevice\nlocation\nmotion\nnotification\nphotos\nscene\nshare\n")
+    (metadata / "top_level.txt").write_text("_cocoa\naudio\nclipboard\ncoreml\ndevice\nlocation\nmotion\nphotos\nscene\nshare\n")
     shutil.copy2(root / "LICENSE", licenses / "LICENSE")
     shutil.copy2(root / "native/physics/box2d/LICENSE", licenses / "Box2D-LICENSE")
     files.extend(path for path in metadata.rglob("*") if path.is_file())

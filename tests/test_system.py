@@ -10,14 +10,13 @@ import unittest
 import device
 import location
 import motion
-import notification
 import share
 from _cocoa.requests import Request
 
 
 class SystemTests(unittest.TestCase):
     def test_imports_leave_unrelated_modules_unloaded(self):
-        result = subprocess.run([sys.executable, "-c", "import sys, location, motion, device, clipboard, share, notification; "
+        result = subprocess.run([sys.executable, "-c", "import sys, location, motion, device, clipboard, share; "
                                  "assert not any(name in sys.modules for name in ('numpy', 'coreml', 'scene', 'audio', 'rubicon'))"],
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -58,10 +57,8 @@ class SystemTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             location.geocode("")
 
-    def test_permissions_can_be_queried_without_prompting(self):
+    def test_location_permission_can_be_queried_without_prompting(self):
         self.assertIn(location.permission(), ("authorized", "not_determined", "denied", "restricted"))
-        if notification.available():
-            self.assertIn(notification.permission(), ("authorized", "not_determined", "denied", "provisional"))
 
     def test_missing_shared_file_fails_before_presenting_ui(self):
         with self.assertRaises(FileNotFoundError):
@@ -87,15 +84,14 @@ class LauncherTests(unittest.TestCase):
     def test_launcher_preserves_venv_and_module_imports(self):
         result = subprocess.run([
             sys.executable, "-m", "cocoa_run", "-c",
-            "import json,sys,device,notification; "
-            "print(json.dumps({'prefix':sys.prefix,'executable':sys.executable,'platform':device.info()['platform'],'notifications':notification.available()}))",
+            "import json,sys,device; "
+            "print(json.dumps({'prefix':sys.prefix,'executable':sys.executable,'platform':device.info()['platform']}))",
         ], capture_output=True, text=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
         values = json.loads(result.stdout)
         self.assertEqual(Path(values["prefix"]).resolve(), Path(sys.prefix).resolve())
         self.assertEqual(Path(values["executable"]).resolve(), Path(sys.executable).resolve())
         self.assertEqual(values["platform"], "macos")
-        self.assertTrue(values["notifications"])
 
 
 if __name__ == "__main__":

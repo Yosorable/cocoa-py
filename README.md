@@ -16,7 +16,6 @@ One distribution provides independent top-level imports:
 | `clipboard` | Text, URLs, images, multiple representations and clipboard state queries. |
 | `share` | System sharing UI for text, URLs, files, images and in-memory attachments. |
 | `device` | OS, hardware, power, battery and storage information. |
-| `notification` | Permission, scheduling and management of local notifications. |
 
 There is no `cocoa.` import prefix. Importing one module does not import the
 others or request permissions. `coreml` initializes its NumPy interface when
@@ -25,7 +24,7 @@ Rubicon-ObjC is not a dependency.
 
 ## Status and installation
 
-**0.1.0a5** is an alpha release of the module collection described above.
+**0.1.0a5** is the latest published alpha release.
 It provides Apple Silicon macOS, arm64 iPhoneOS, and arm64 iOS Simulator wheels on
 [PyPI](https://pypi.org/project/cocoa-py/0.1.0a5/), plus a source distribution.
 The earlier **0.1.0a1** preview contained only Core ML.

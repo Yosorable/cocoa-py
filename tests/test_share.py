@@ -32,7 +32,7 @@ class ShareTests(unittest.TestCase):
             "-Wno-unused-function", "-Wno-unused-parameter", "-mmacosx-version-min=14.0",
             "-dynamiclib", "-undefined", "dynamic_lookup", "-I" + sysconfig.get_paths()["include"],
             "-framework", "Foundation", "-framework", "AppKit", "-framework", "CoreGraphics",
-            "-framework", "CoreLocation", "-framework", "UserNotifications", "-framework", "IOKit",
+            "-framework", "CoreLocation", "-framework", "IOKit",
             str(root / "tests/native/share_fixture.mm"), "-o", str(binary),
         ], capture_output=True, text=True, timeout=90)
         if build.returncode:

@@ -126,7 +126,7 @@ class AppleBuildExt(build_ext):
                 "xcrun", "clang++", "-std=c++17", "-fobjc-arc", "-O2", "-g0",
                 "-mmacosx-version-min=14.0", "-I" + sysconfig.get_paths()["include"],
                 *[arg for arch in sorted(architectures) for arg in ("-arch", arch)],
-                "-framework", "Foundation", "-framework", "UserNotifications",
+                "-framework", "Foundation",
                 "native/runner/CocoaPyRunner.mm", "-o", str(runner),
             ], check=True)
 
@@ -144,13 +144,13 @@ def native_extension(name, source, macos=(), ios=(), *, extra_sources=(), includ
 
 
 setup(
-    py_modules=["audio", "photos", "location", "motion", "device", "clipboard", "share", "notification"]
+    py_modules=["audio", "photos", "location", "motion", "device", "clipboard", "share"]
                + ([] if is_ios else ["cocoa_run"]),
     entry_points={} if is_ios else {"console_scripts": ["cocoa-py = cocoa_run:main"]},
     ext_modules=[
         native_extension("_cocoa._system", "native/system/SystemModule.mm",
-                         ("AppKit", "CoreLocation", "UserNotifications", "IOKit"),
-                         ("UIKit", "CoreLocation", "CoreMotion", "UserNotifications")),
+                         ("AppKit", "CoreLocation", "IOKit"),
+                         ("UIKit", "CoreLocation", "CoreMotion")),
         native_extension("coreml", "native/coreml/CoreMLModule.mm",
                          ("CoreML", "CoreVideo"), ("CoreML", "CoreVideo")),
         native_extension("_cocoa._audio", "native/audio/AudioModule.mm",
