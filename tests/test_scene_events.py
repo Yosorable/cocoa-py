@@ -188,6 +188,54 @@ class NativeEventTests(unittest.TestCase):
         self.assertFalse(touches)
         self.assertIsNone(self.scene.pointer_position)
 
+    def enqueue_hover_barrier(self, kind):
+        if kind == "key":
+            self.key("down", dispatch=False)
+            self.key("up", dispatch=False)
+            return ("key_down", "key_up")
+        if kind == "mouse":
+            self.fixture.pointer(self.window.handle, "down", 100, 20)
+            self.fixture.pointer(self.window.handle, "up", 100, 20)
+            return ("touch_began", "touch_ended")
+        self.fixture.scroll(self.window.handle, 100, 20, 0, -12)
+        return ("scroll",)
+
+    def test_hover_coalescing_preserves_interleaved_input_order(self):
+        events = []
+        self.scene.pointer_moved = lambda event: events.append(("hover", event.position))
+        for name in ("key_down", "key_up", "touch_began", "touch_ended", "scroll"):
+            setattr(self.scene, name, lambda event, name=name: events.append((name, self.scene.pointer_position)))
+        for kind in ("key", "mouse", "scroll"):
+            with self.subTest(kind=kind):
+                self.fixture.pointer(self.window.handle, "entered", 10, 20)
+                self.scene._process_touches()
+                events.clear()
+                for x in (50, 100):
+                    self.fixture.pointer(self.window.handle, "moved", x, 20)
+                callbacks = self.enqueue_hover_barrier(kind)
+                for x in (150, 200):
+                    self.fixture.pointer(self.window.handle, "moved", x, 20)
+                self.scene._process_touches()
+                self.assertEqual(events, [("hover", (100, 20)),
+                                          *((name, (100, 20)) for name in callbacks),
+                                          ("hover", (200, 20))])
+
+    def test_draining_other_input_does_not_allow_hover_to_merge_across_it(self):
+        for kind, consume in (("key", self.window.consume_platform_events),
+                              ("mouse", self.window.consume_touches),
+                              ("scroll", self.window.consume_scrolls)):
+            with self.subTest(kind=kind):
+                self.fixture.pointer(self.window.handle, "entered", 10, 20)
+                self.window.consume_pointer_events()
+                self.fixture.pointer(self.window.handle, "moved", 100, 20)
+                self.enqueue_hover_barrier(kind)
+                consume()
+                for x in (150, 200):
+                    self.fixture.pointer(self.window.handle, "moved", x, 20)
+                samples = self.window.consume_pointer_events()
+                self.assertEqual([(e["x"], e["prev_x"]) for e in samples],
+                                 [(100, 10), (200, 100)])
+
     def test_appkit_secondary_and_middle_buttons_preserve_identity(self):
         events, clicks = [], []
         button = Button("Primary", x=100, y=100, on_click=lambda _: clicks.append(True))

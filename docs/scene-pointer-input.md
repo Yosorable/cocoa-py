@@ -43,8 +43,9 @@ hovered position, or `None` after exit or loss of input ownership.
 Losing focus, entering the background, changing text-input ownership, or closing
 a scene cancels its current hover once. The exit event has `cancelled=True`.
 Queued samples from an earlier input epoch are discarded. Native consecutive
-move samples may coalesce; entry and exit boundaries are retained. Hover does
-not create a touch, press a control, or acquire drag capture.
+move samples may coalesce; entry and exit boundaries are retained. Moves are
+never coalesced across queued touch, key, or scroll events. Hover does not create
+a touch, press a control, or acquire drag capture.
 
 `Touch.button` identifies the initiating button: `0` is primary, `1` secondary,
 `2` middle, and larger values represent additional AppKit buttons. Direct touch

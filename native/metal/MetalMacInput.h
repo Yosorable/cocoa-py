@@ -45,6 +45,7 @@ static unsigned metalMacModifiers(NSEventModifierFlags flags) {
     NSPoint previous = phase == 0 ? point : self.previousPointer;
     self.previousPointer = point;
     if (record.touchQueue.size() >= 4096) { metalResetInput(record, "overflow"); return; }
+    record.coalescingPointerMoves = false;
     record.touchQueue.push_back({phase, identifier, point.x, point.y, previous.x, previous.y, event.timestamp, record.inputEpoch,
                                 (int)event.buttonNumber, 1});
     if (phase >= 2) record.touchIdMap.erase(key);
@@ -80,6 +81,7 @@ static unsigned metalMacModifiers(NSEventModifierFlags flags) {
     sample.epoch = window->second.inputEpoch;
     auto &queue = window->second.scrollQueue;
     if (queue.size() >= 4096) queue.erase(queue.begin());
+    window->second.coalescingPointerMoves = false;
     queue.push_back(sample);
 }
 - (void)keyDown:(NSEvent *)event {

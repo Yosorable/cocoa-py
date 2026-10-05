@@ -315,7 +315,8 @@ float4 shade_particle_texture(ParticleOut in, texture2d<float> tex) {
     float2 uv = in.uv * 0.5 + 0.5;       // [-1,1] → [0,1]
     float4 t = tex.sample(s, uv);
     float a = t.a * in.color.a;
-    return float4(t.rgb * in.color.rgb * a, a);  // tint + pre-multiplied alpha
+    // Loaded images and scene textures already have premultiplied RGB.
+    return float4(t.rgb * in.color.rgb * in.color.a, a);
 }
 
 fragment float4 particle_fs(ParticleOut in [[stage_in]]) {

@@ -34,7 +34,9 @@ source-over alpha coverage, so transparent captures stay usable as textures.
 Changing `blend` invalidates cached sprite commands, including custom subclasses.
 
 `ParticleEmitter.blend` now selects the corresponding Metal pipeline instead of
-being ignored. Its existing default is `"additive"`; use `"alpha"` for smoke or
-other opaque particles. Clipping and multisampled rendering use the same mode.
+being ignored. Its default is `"alpha"`, matching `Sprite`; choose `"additive"`
+explicitly for fireworks, sparks, and other glowing particles. Clipping and
+multisampled rendering use the same mode. Particle textures use premultiplied
+alpha, as do loaded images and scene-rendered textures.
 At the low-level API, `gpu.Pipeline(..., blend_mode="additive")` selects this
 behavior; `blending=False` continues to disable blending entirely.

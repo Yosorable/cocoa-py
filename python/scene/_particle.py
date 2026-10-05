@@ -39,7 +39,7 @@ class ParticleEmitter(Node):
                  size=(2, 6),
                  size_over_life=(1.0, 0.2),
                  opacity_over_life=(1.0, 0.0),
-                 blend="additive",
+                 blend="alpha",
                  texture=None,
                  emit_area=(0, 0),
                  **kw):

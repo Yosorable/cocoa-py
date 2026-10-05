@@ -275,6 +275,7 @@ struct WindowRecord {
     std::vector<TouchEvent> touchQueue;
     std::vector<ScrollEvent> scrollQueue;
     std::vector<PointerEvent> pointerQueue;
+    bool coalescingPointerMoves = false; // The last queued input was hover motion.
     std::unordered_map<void *, long long> touchIdMap;
     std::unordered_map<void *, int> touchButtonMap;
     long long nextTouchId = 1;
@@ -329,6 +330,7 @@ static std::unordered_map<long long, WindowRecord> gWindows;
             metalResetInput(wr, "overflow");
             break;
         }
+        wr.coalescingPointerMoves = false;
         wr.touchQueue.push_back({
             phase, tid,
             loc.x, loc.y,
@@ -2426,6 +2428,7 @@ static PyObject *metal_consume_pointer_events(PyObject *, PyObject *args) {
             PyErr_SetString(PyExc_KeyError, "Window handle not found."); return nullptr;
         }
         events.swap(window->second.pointerQueue);
+        window->second.coalescingPointerMoves = false;
     }
     PyObject *result = PyList_New(events.size());
     if (!result) return nullptr;

@@ -41,6 +41,7 @@ static void metalResetInput(WindowRecord &window, const char *reason, bool queue
     window.touchQueue.clear();
     window.scrollQueue.clear();
     window.pointerQueue.clear();
+    window.coalescingPointerMoves = false;
     window.touchIdMap.clear();
     window.touchButtonMap.clear();
     window.pressedKeys.clear();
@@ -68,7 +69,9 @@ static void metalQueuePointer(long long handle, PointerEvent event) {
     if (!window.active || !window.foreground || !window.focused) return;
     event.epoch = window.inputEpoch;
     auto &queue = window.pointerQueue;
-    if (event.phase == 1 && !queue.empty() && queue.back().phase == 1) {
+    // Other queues can be drained independently, so retain their barrier even
+    // after consumption instead of inferring it from their current contents.
+    if (window.coalescingPointerMoves && event.phase == 1 && !queue.empty() && queue.back().phase == 1) {
         event.prevX = queue.back().prevX;
         event.prevY = queue.back().prevY;
         queue.back() = event;
@@ -76,6 +79,7 @@ static void metalQueuePointer(long long handle, PointerEvent event) {
         if (queue.size() >= 4096) queue.erase(queue.begin());
         queue.push_back(event);
     }
+    window.coalescingPointerMoves = event.phase == 1;
 }
 
 static void metalPublishState(long long handle, bool active, bool foreground, bool focused) {
@@ -99,6 +103,7 @@ static void metalPublishState(long long handle, bool active, bool foreground, bo
         if (window.platformQueue.size() >= 4096) metalResetInput(window, "overflow");
         event.epoch = window.inputEpoch;
         event.sequence = ++window.platformSequence;
+        window.coalescingPointerMoves = false;
         window.platformQueue.push_back(std::move(event));
         if (window.vsyncSemaphore) dispatch_semaphore_signal(window.vsyncSemaphore);
         if (!metalGPUAllowed(window)) submitted = window.lastSubmittedCB;
@@ -210,6 +215,7 @@ static bool metalQueueKey(long long handle, unsigned code, NSString *characters,
     event.kind = 0; event.key = std::move(key);
     event.timestamp = timestamp; event.epoch = window.inputEpoch;
     event.sequence = ++window.platformSequence;
+    window.coalescingPointerMoves = false;
     window.platformQueue.push_back(std::move(event));
     if (window.vsyncSemaphore) dispatch_semaphore_signal(window.vsyncSemaphore);
     return true;
