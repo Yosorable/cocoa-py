@@ -35,6 +35,25 @@ static NSString *CocoaPyLocationStatus(CLAuthorizationStatus status) {
         default: return @"not_determined";
     }
 }
+static void CocoaPyLocationServices(CocoaPyRequest *request, void (^completion)(BOOL)) {
+    // The services query can perform blocking IPC. Keep it off the UI thread;
+    // manager creation, authorization and delegate delivery stay on its run loop.
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        @autoreleasepool {
+            if (request.closed || request.done) return;
+            @try {
+                BOOL enabled = CLLocationManager.locationServicesEnabled;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (request.closed || request.done) return;
+                    @try { completion(enabled); }
+                    @catch (NSException *exception) { [request fail:@"runtime" message:exception.reason]; }
+                });
+            } @catch (NSException *exception) {
+                [request fail:@"runtime" message:exception.reason];
+            }
+        }
+    });
+}
 static NSDictionary *CocoaPyCoordinates(CLLocation *value) {
     BOOL hasVerticalAccuracy = std::isfinite(value.verticalAccuracy) && value.verticalAccuracy >= 0;
     return @{ @"latitude": @(value.coordinate.latitude), @"longitude": @(value.coordinate.longitude),
@@ -144,10 +163,14 @@ static NSDictionary *CocoaPyCoordinates(CLLocation *value) {
 static CocoaPyRequest *CocoaPyLocation(NSString *name, NSDictionary *args) {
     if ([name isEqual:@"location.heading_available"]) return CocoaPyValue(@(CocoaPyHeadingAvailable()));
     if ([name isEqual:@"location.status"]) {
-        CLLocationManager *manager = [CLLocationManager new];
-        return CocoaPyValue(@{ @"permission": CocoaPyLocationStatus(manager.authorizationStatus),
-            @"enabled": @(CLLocationManager.locationServicesEnabled),
-            @"precise": @(manager.accuracyAuthorization == CLAccuracyAuthorizationFullAccuracy) });
+        CocoaPyRequest *request = [CocoaPyRequest new];
+        CocoaPyLocationServices(request, ^(BOOL enabled) {
+            CLLocationManager *manager = [CLLocationManager new];
+            [request finish:@{ @"permission": CocoaPyLocationStatus(manager.authorizationStatus),
+                @"enabled": @(enabled),
+                @"precise": @(manager.accuracyAuthorization == CLAccuracyAuthorizationFullAccuracy) }];
+        });
+        return request;
     }
     if ([name isEqual:@"location.geocode"] || [name isEqual:@"location.reverse_geocode"]) {
         BOOL reverse = [name isEqual:@"location.reverse_geocode"];
@@ -208,39 +231,47 @@ static CocoaPyRequest *CocoaPyLocation(NSString *name, NSDictionary *args) {
                               !CocoaPyLocationNumber(args, @"distance_filter", 0, 100000)))
         return CocoaPyFailure(@"value", @"Invalid location sampling options.");
     BOOL needsLocation = !heading || [args[@"true_north"] boolValue];
-    if (needsLocation && !CLLocationManager.locationServicesEnabled && !permission)
-        return CocoaPyFailure(@"permission", @"Location Services are disabled.");
     CocoaPyLocationRequest *request = [CocoaPyLocationRequest new];
     request.permissionOnly = permission; request.streaming = stream;
     request.headingMode = heading; request.trueNorth = heading && needsLocation;
     request.maxAge = [args[@"max_age"] doubleValue];
     request.capacity = permission ? 1 : [args[@"capacity"] unsignedIntegerValue];
-    request.manager = [CLLocationManager new];
-    request.manager.desiredAccuracy = heading ? kCLLocationAccuracyKilometer :
-        (permission ? kCLLocationAccuracyBest : [args[@"accuracy"] doubleValue]);
-    request.manager.distanceFilter = [args[@"distance_filter"] doubleValue] ?: kCLDistanceFilterNone;
+    void (^start)(void) = ^{
+        request.manager = [CLLocationManager new];
+        request.manager.desiredAccuracy = heading ? kCLLocationAccuracyKilometer :
+            (permission ? kCLLocationAccuracyBest : [args[@"accuracy"] doubleValue]);
+        request.manager.distanceFilter = [args[@"distance_filter"] doubleValue] ?: kCLDistanceFilterNone;
 #if TARGET_OS_IOS
-    if (heading) {
-        request.manager.headingFilter = [args[@"angle_filter"] doubleValue] ?: kCLHeadingFilterNone;
-        request.manager.headingOrientation = (CLDeviceOrientation)orientation.integerValue;
-    }
-#endif
-    if (needsLocation && request.manager.authorizationStatus == kCLAuthorizationStatusNotDetermined) {
-#if COCOA_PY_UIKIT
-        NSString *key = @"NSLocationWhenInUseUsageDescription";
-#else
-        NSString *key = @"NSLocationUsageDescription";
-        CocoaPyPrepareApplication();
-#endif
-        if (!CocoaPyUsageKey(key)) {
-            [request fail:@"runtime" message:[NSString stringWithFormat:@"The host app must provide %@. On macOS, use the cocoa-py launcher.", key]];
-            return request;
+        if (heading) {
+            request.manager.headingFilter = [args[@"angle_filter"] doubleValue] ?: kCLHeadingFilterNone;
+            request.manager.headingOrientation = (CLDeviceOrientation)orientation.integerValue;
         }
-        request.manager.delegate = request;
-        [request.manager requestWhenInUseAuthorization];
+#endif
+        if (needsLocation && request.manager.authorizationStatus == kCLAuthorizationStatusNotDetermined) {
+#if COCOA_PY_UIKIT
+            NSString *key = @"NSLocationWhenInUseUsageDescription";
+#else
+            NSString *key = @"NSLocationUsageDescription";
+            CocoaPyPrepareApplication();
+#endif
+            if (!CocoaPyUsageKey(key)) {
+                [request fail:@"runtime" message:[NSString stringWithFormat:@"The host app must provide %@. On macOS, use the cocoa-py launcher.", key]];
+                return;
+            }
+            request.manager.delegate = request;
+            [request.manager requestWhenInUseAuthorization];
+        } else {
+            request.manager.delegate = request;
+            [request beginUpdates];
+        }
+    };
+    if (needsLocation && !permission) {
+        CocoaPyLocationServices(request, ^(BOOL enabled) {
+            if (!enabled) [request fail:@"permission" message:@"Location Services are disabled."];
+            else start();
+        });
     } else {
-        request.manager.delegate = request;
-        [request beginUpdates];
+        start();
     }
     return request;
 }

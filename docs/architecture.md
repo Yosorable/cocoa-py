@@ -52,6 +52,12 @@ loop while waiting. A sample's pending wake is retired when its queue becomes
 empty, under the same lock as the producer's notification. Waiting for completion
 does not treat unread stream samples as a completed operation.
 
+Location Services availability checks run on a background queue so their system
+queries do not block the UI thread. Location manager creation, authorization
+requests and delegate callbacks remain on the main run loop. Python calls keep
+their synchronous interface through the request wait loop; closing a request
+during an availability check prevents its later completion from starting updates.
+
 Each system request owns its resources or a subscription to a shared resource.
 Motion streams share one native manager and the sampling source for each sensor,
 while retaining independent bounded queues. Sensor streams discard their oldest

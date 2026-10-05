@@ -1,7 +1,8 @@
-// Drive the production delegate with constructed samples. This executable
-// never creates a location manager, requests access, or contacts a geocoder.
+// Drive production requests with controlled producers. This executable never
+// creates a real location manager, requests access, or contacts a geocoder.
 #include "../../native/system/SystemRequest.h"
 #import <CoreLocation/CoreLocation.h>
+#include <atomic>
 
 // Replace only the network producer. The production request and completion
 // handler still process results, cancellation, and errors.
@@ -19,20 +20,60 @@ static NSUInteger geocodeStarts = 0;
 }
 - (void)cancelGeocode { self.cancellations++; }
 @end
-#define CLGeocoder TestGeocoder
-#include "../../native/system/Location.h"
-#undef CLGeocoder
-
+static std::atomic<unsigned> servicesQueries{0}, managerCreations{0};
+static std::atomic<bool> servicesOnMain{false}, managerOffMain{false};
+static BOOL servicesEnabled = YES, servicesThrows = NO, managerThrows = NO;
+static CLAuthorizationStatus initialAuthorization = kCLAuthorizationStatusAuthorizedAlways;
+static CLAccuracyAuthorization initialAccuracy = CLAccuracyAuthorizationFullAccuracy;
+static dispatch_semaphore_t servicesGate;
+static void checkManagerThread() {
+    if (!NSThread.isMainThread) managerOffMain = true;
+}
 @interface TestLocationManager : NSObject
 @property(nonatomic) CLAuthorizationStatus authorizationStatus;
+@property(nonatomic) CLAccuracyAuthorization accuracyAuthorization;
+@property(nonatomic) CLLocationAccuracy desiredAccuracy;
+@property(nonatomic) CLLocationDistance distanceFilter;
 @property(nonatomic, weak) id delegate;
 @property(nonatomic) NSUInteger starts;
 @property(nonatomic) NSUInteger stops;
++ (BOOL)locationServicesEnabled;
+- (void)requestWhenInUseAuthorization;
+- (void)startUpdatingLocation;
+- (void)stopUpdatingLocation;
 @end
 @implementation TestLocationManager
-- (void)startUpdatingLocation { self.starts++; }
-- (void)stopUpdatingLocation { self.stops++; }
+@synthesize authorizationStatus = _authorizationStatus, accuracyAuthorization = _accuracyAuthorization;
++ (BOOL)locationServicesEnabled {
+    dispatch_semaphore_t gate = servicesGate;
+    servicesQueries++;
+    if (NSThread.isMainThread) servicesOnMain = true;
+    // A regression must fail assertions rather than deadlock this executable.
+    else if (gate) dispatch_semaphore_wait(gate, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
+    if (servicesThrows) [NSException raise:@"TestServicesError" format:@"Service query failed."];
+    return servicesEnabled;
+}
+- (instancetype)init {
+    checkManagerThread(); managerCreations++;
+    if (managerThrows) [NSException raise:@"TestManagerError" format:@"Manager creation failed."];
+    if ((self = [super init])) {
+        _authorizationStatus = initialAuthorization;
+        _accuracyAuthorization = initialAccuracy;
+    }
+    return self;
+}
+- (CLAuthorizationStatus)authorizationStatus { checkManagerThread(); return _authorizationStatus; }
+- (CLAccuracyAuthorization)accuracyAuthorization { checkManagerThread(); return _accuracyAuthorization; }
+- (void)requestWhenInUseAuthorization { checkManagerThread(); }
+- (void)startUpdatingLocation { checkManagerThread(); self.starts++; }
+- (void)stopUpdatingLocation { checkManagerThread(); self.stops++; }
 @end
+
+#define CLGeocoder TestGeocoder
+#define CLLocationManager TestLocationManager
+#include "../../native/system/Location.h"
+#undef CLLocationManager
+#undef CLGeocoder
 
 @interface TestHeading : NSObject
 @property(nonatomic) double magneticHeading;
@@ -58,7 +99,7 @@ static CocoaPyLocationRequest *request(BOOL stream = NO, BOOL compass = NO, BOOL
     CocoaPyLocationRequest *value = [CocoaPyLocationRequest new];
     TestLocationManager *manager = [TestLocationManager new];
     manager.authorizationStatus = kCLAuthorizationStatusAuthorizedAlways;
-    value.manager = (CLLocationManager *)(id)manager;
+    value.manager = manager;
     value.streaming = stream; value.headingMode = compass; value.trueNorth = trueNorth;
     value.maxAge = 15; value.startedAt = NSDate.date.timeIntervalSince1970 - 1;
     return value;
@@ -69,53 +110,105 @@ static NSDictionary *state(CocoaPyLocationRequest *value) {
 static NSArray *latitudes(CocoaPyLocationRequest *value) {
     return [value.samples valueForKey:@"latitude"];
 }
+static void pumpUntil(BOOL (^ready)(void)) {
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:3];
+    while (!ready() && deadline.timeIntervalSinceNow > 0)
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.001, true);
+    if (!ready()) [NSException raise:@"TestTimeout" format:@"An asynchronous request did not make progress."];
+}
+static NSDictionary *servicesCase(NSString *operation, BOOL enabled, BOOL cancel = NO,
+                                  BOOL queryError = NO, BOOL managerError = NO) {
+    servicesQueries = 0; managerCreations = 0; servicesOnMain = false; managerOffMain = false;
+    servicesEnabled = enabled; servicesThrows = queryError; managerThrows = managerError;
+    initialAuthorization = cancel ? kCLAuthorizationStatusNotDetermined : kCLAuthorizationStatusAuthorizedAlways;
+    initialAccuracy = CLAccuracyAuthorizationReducedAccuracy;
+    servicesGate = dispatch_semaphore_create(0);
+    NSDictionary *options = @{ @"max_age": @15, @"capacity": @2, @"accuracy": @10, @"distance_filter": @25 };
+    CocoaPyRequest *pending = CocoaPyLocation(operation, options);
+    __block BOOL servicedUI = NO;
+    dispatch_async(dispatch_get_main_queue(), ^{ servicedUI = YES; });
+    pumpUntil(^BOOL { return servicedUI && servicesQueries.load() > 0; });
+    BOOL pendingWhileUIRan = !pending.done && managerCreations == 0;
+    NSDictionary *snapshot;
+    NSUInteger starts = 0;
+    BOOL released = NO;
+    if (cancel) {
+        [pending close];
+        snapshot = [pending snapshot:NO];
+        __weak CocoaPyRequest *weakPending = pending;
+        pending = nil;
+        dispatch_semaphore_signal(servicesGate);
+        pumpUntil(^BOOL { return weakPending == nil; });
+        released = YES;
+    } else {
+        dispatch_semaphore_signal(servicesGate);
+        pumpUntil(^BOOL {
+            return pending.done || ([pending isKindOfClass:CocoaPyLocationRequest.class] &&
+                                    ((CocoaPyLocationRequest *)pending).started);
+        });
+        if ([pending isKindOfClass:CocoaPyLocationRequest.class]) {
+            CocoaPyLocationRequest *location = (CocoaPyLocationRequest *)pending;
+            starts = location.manager.starts;
+            if (location.started) [location locationManager:(id)location.manager didUpdateLocations:@[fix(42, 0)]];
+        }
+        snapshot = [pending snapshot:NO];
+        [pending close];
+    }
+    servicesGate = nil;
+    servicesThrows = NO; managerThrows = NO;
+    initialAuthorization = kCLAuthorizationStatusAuthorizedAlways;
+    initialAccuracy = CLAccuracyAuthorizationFullAccuracy;
+    return @{ @"pending_while_ui_ran": @(pendingWhileUIRan), @"queries": @(servicesQueries.load()),
+        @"queried_on_main": @(servicesOnMain.load()), @"manager_off_main": @(managerOffMain.load()),
+        @"managers": @(managerCreations.load()), @"starts": @(starts), @"released": @(released), @"state": snapshot };
+}
 int main() {
     @autoreleasepool {
         NSMutableDictionary *results = [NSMutableDictionary dictionary];
         CocoaPyLocationRequest *value = request();
         TestLocationManager *manager = (TestLocationManager *)(id)value.manager;
-        [value locationManager:value.manager didUpdateLocations:@[fix(1, 10), fix(2, 0.1)]];
+        [value locationManager:(id)value.manager didUpdateLocations:@[fix(1, 10), fix(2, 0.1)]];
         results[@"latest"] = @{ @"sample": value.result, @"stops": @(manager.stops) };
         [value close];
 
         value = request();
-        [value locationManager:value.manager didUpdateLocations:@[fix(1, 0.5), fix(2, 0.1, -1)]];
+        [value locationManager:(id)value.manager didUpdateLocations:@[fix(1, 0.5), fix(2, 0.1, -1)]];
         results[@"invalid_latest"] = value.result;
         [value close];
 
         value = request(); value.maxAge = 0;
-        [value locationManager:value.manager didUpdateLocations:@[fix(1, 2)]];
+        [value locationManager:(id)value.manager didUpdateLocations:@[fix(1, 2)]];
         BOOL rejectedCache = !value.done;
-        [value locationManager:value.manager didUpdateLocations:@[fix(2, 0.25)]];
+        [value locationManager:(id)value.manager didUpdateLocations:@[fix(2, 0.25)]];
         results[@"zero_age"] = @{ @"rejected_cache": @(rejectedCache), @"state": state(value) };
         [value close];
 
         value = request(YES); value.maxAge = 0; value.capacity = 2;
-        [value locationManager:value.manager didUpdateLocations:@[fix(0, 3), fix(1, 0.5), fix(2, 0.3), fix(3, 0.1)]];
+        [value locationManager:(id)value.manager didUpdateLocations:@[fix(0, 3), fix(1, 0.5), fix(2, 0.3), fix(3, 0.1)]];
         results[@"stream"] = @{ @"latitudes": latitudes(value), @"state": state(value) };
         [value close];
         [value locationManager:nil didUpdateLocations:@[fix(4, 0.1)]];
         results[@"closed_stream"] = @{ @"state": state(value), @"released_manager": @(value.manager == nil) };
 
         value = request(); value.maxAge = 0.5;
-        [value locationManager:value.manager didUpdateLocations:@[fix(1, 2), fix(91, 0.1), fix(2, 0.1, NAN)]];
+        [value locationManager:(id)value.manager didUpdateLocations:@[fix(1, 2), fix(91, 0.1), fix(2, 0.1, NAN)]];
         results[@"invalid_locations_skipped"] = @(!value.done && !value.samples.count);
         [value close];
 
         value = request(NO, YES);
-        [value locationManager:value.manager didUpdateHeading:heading(123, -1)];
+        [value locationManager:(id)value.manager didUpdateHeading:heading(123, -1)];
         results[@"magnetic"] = value.result;
         [value close];
 
         value = request(NO, YES, YES); value.maxAge = 0;
         manager = (TestLocationManager *)(id)value.manager;
-        [value locationManager:value.manager didUpdateHeading:heading(120, -1)];
+        [value locationManager:(id)value.manager didUpdateHeading:heading(120, -1)];
         BOOL waitsForTrue = !value.done;
-        [value locationManager:value.manager didUpdateLocations:@[fix(1, 0.1)]];
+        [value locationManager:(id)value.manager didUpdateLocations:@[fix(1, 0.1)]];
         BOOL ignoresFix = !value.done;
-        [value locationManager:value.manager didUpdateHeading:heading(120, 125, 3, 2)];
+        [value locationManager:(id)value.manager didUpdateHeading:heading(120, 125, 3, 2)];
         BOOL rejectsOld = !value.done;
-        [value locationManager:value.manager didUpdateHeading:heading(120, 125, 3, 0.1)];
+        [value locationManager:(id)value.manager didUpdateHeading:heading(120, 125, 3, 0.1)];
         results[@"true_north"] = @{ @"waits_for_true": @(waitsForTrue), @"ignores_fix": @(ignoresFix),
             @"rejects_old": @(rejectsOld), @"sample": value.result, @"location_stops": @(manager.stops) };
         [value close];
@@ -123,10 +216,10 @@ int main() {
         value = request(YES, YES); value.capacity = 2;
         for (CLHeading *sample in @[heading(1, -1, -1), heading(NAN), heading(-1), heading(360),
                                    heading(1, -1, INFINITY), heading(1, -1, 5, 30)])
-            [value locationManager:value.manager didUpdateHeading:sample];
+            [value locationManager:(id)value.manager didUpdateHeading:sample];
         BOOL rejectsInvalid = value.samples.count == 0;
         for (int index = 1; index <= 3; index++)
-            [value locationManager:value.manager didUpdateHeading:heading(index)];
+            [value locationManager:(id)value.manager didUpdateHeading:heading(index)];
         results[@"heading_stream"] = @{ @"rejects_invalid": @(rejectsInvalid),
             @"angles": [value.samples valueForKey:@"magnetic_heading"], @"state": state(value) };
         [value close];
@@ -157,9 +250,9 @@ int main() {
 
         value = request(YES, YES, YES);
         manager = (TestLocationManager *)(id)value.manager;
-        [value locationManager:value.manager didFailWithError:[NSError errorWithDomain:kCLErrorDomain code:kCLErrorLocationUnknown userInfo:nil]];
+        [value locationManager:(id)value.manager didFailWithError:[NSError errorWithDomain:kCLErrorDomain code:kCLErrorLocationUnknown userInfo:nil]];
         BOOL ignoredTransient = !value.done;
-        [value locationManager:value.manager didFailWithError:[NSError errorWithDomain:kCLErrorDomain code:kCLErrorHeadingFailure userInfo:nil]];
+        [value locationManager:(id)value.manager didFailWithError:[NSError errorWithDomain:kCLErrorDomain code:kCLErrorHeadingFailure userInfo:nil]];
         results[@"failure"] = @{ @"ignored_transient": @(ignoredTransient), @"stops": @(manager.stops), @"state": state(value) };
         [value close];
 
@@ -180,7 +273,7 @@ int main() {
         BOOL pendingPermission = !value.done && manager.starts == 0;
         [value close]; [value close];
         manager.authorizationStatus = kCLAuthorizationStatusAuthorizedAlways;
-        [value locationManagerDidChangeAuthorization:(CLLocationManager *)(id)manager];
+        [value locationManagerDidChangeAuthorization:(id)manager];
         results[@"cancelled_permission"] = @{ @"was_pending": @(pendingPermission),
             @"starts": @(manager.starts), @"released_manager": @(value.manager == nil), @"state": state(value) };
 
@@ -188,7 +281,7 @@ int main() {
         CLLocation *nonfinite = [[CLLocation alloc] initWithCoordinate:CLLocationCoordinate2DMake(1, 2)
             altitude:NAN horizontalAccuracy:5 verticalAccuracy:INFINITY course:INFINITY speed:INFINITY
             timestamp:NSDate.date];
-        [value locationManager:value.manager didUpdateLocations:@[nonfinite]];
+        [value locationManager:(id)value.manager didUpdateLocations:@[nonfinite]];
         BOOL serializable = [NSJSONSerialization isValidJSONObject:state(value)];
         results[@"nonfinite_optional"] = @{ @"serializable": @(serializable),
             @"sample": serializable ? value.result : NSNull.null };
@@ -214,6 +307,20 @@ int main() {
         value = (CocoaPyLocationRequest *)CocoaPyLocation(@"location.reverse_geocode", @{ @"latitude": @1, @"longitude": @2 });
         value.geocoder.completion(nil, [NSError errorWithDomain:kCLErrorDomain code:kCLErrorNetwork userInfo:nil]);
         results[@"geocoding_failure"] = state(value);
+        [value close];
+
+        results[@"services_status"] = servicesCase(@"location.status", YES);
+        results[@"services_status_disabled"] = servicesCase(@"location.status", NO);
+        results[@"services_current"] = servicesCase(@"location.current", YES);
+        results[@"services_watch"] = servicesCase(@"location.watch", YES);
+        results[@"services_disabled"] = servicesCase(@"location.current", NO);
+        results[@"services_cancelled"] = servicesCase(@"location.current", YES, YES);
+        results[@"services_status_cancelled"] = servicesCase(@"location.status", YES, YES);
+        results[@"services_error"] = servicesCase(@"location.status", YES, NO, YES);
+        results[@"services_manager_error"] = servicesCase(@"location.current", YES, NO, NO, YES);
+        servicesQueries = 0; servicesEnabled = NO; initialAuthorization = kCLAuthorizationStatusDenied;
+        value = (CocoaPyLocationRequest *)CocoaPyLocation(@"location.request_permission", @{});
+        results[@"permission_without_services_query"] = @{ @"queries": @(servicesQueries.load()), @"state": state(value) };
         [value close];
 
         NSData *data = [NSJSONSerialization dataWithJSONObject:results options:NSJSONWritingPrettyPrinted error:nil];

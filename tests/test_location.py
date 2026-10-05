@@ -31,6 +31,54 @@ class LocationTests(unittest.TestCase):
         result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10, check=True)
         cls.events = json.loads(result.stdout)
 
+    def test_services_queries_leave_main_run_loop_responsive(self):
+        for key in ("services_status", "services_status_disabled", "services_current", "services_watch"):
+            with self.subTest(operation=key):
+                result = self.events[key]
+                self.assertTrue(result["pending_while_ui_ran"])
+                self.assertEqual(result["queries"], 1)
+                self.assertFalse(result["queried_on_main"])
+                self.assertFalse(result["manager_off_main"])
+                self.assertEqual(result["managers"], 1)
+                self.assertIsNone(result["state"]["error"])
+        for key, enabled in (("services_status", True), ("services_status_disabled", False)):
+            self.assertEqual(self.events[key]["state"]["result"],
+                             dict(permission="authorized", enabled=enabled, precise=False))
+        self.assertEqual(self.events["services_current"]["state"]["result"]["latitude"], 42)
+        self.assertEqual(self.events["services_watch"]["state"]["sample"]["latitude"], 42)
+        for key in ("services_current", "services_watch"):
+            self.assertEqual(self.events[key]["starts"], 1)
+
+    def test_disabled_services_fail_before_creating_a_manager(self):
+        result = self.events["services_disabled"]
+        self.assertEqual(result["managers"], 0)
+        self.assertEqual(result["state"]["error"]["kind"], "permission")
+        self.assertIn("disabled", result["state"]["error"]["message"])
+
+    def test_cancelling_pending_services_query_prevents_late_startup(self):
+        for key in ("services_cancelled", "services_status_cancelled"):
+            with self.subTest(operation=key):
+                result = self.events[key]
+                self.assertTrue(result["pending_while_ui_ran"])
+                self.assertTrue(result["released"])
+                self.assertEqual(result["managers"], 0)
+                self.assertTrue(result["state"]["closed"])
+                self.assertFalse(result["state"]["done"])
+                self.assertIsNone(result["state"]["error"])
+
+    def test_async_services_and_manager_exceptions_finish_requests(self):
+        for key, message in (("services_error", "Service query failed."),
+                             ("services_manager_error", "Manager creation failed.")):
+            with self.subTest(operation=key):
+                result = self.events[key]
+                self.assertTrue(result["state"]["done"])
+                self.assertEqual(result["state"]["error"], dict(kind="runtime", message=message))
+
+    def test_permission_request_does_not_query_global_services(self):
+        result = self.events["permission_without_services_query"]
+        self.assertEqual(result["queries"], 0)
+        self.assertEqual(result["state"]["result"], "denied")
+
     def test_current_uses_newest_valid_sample_and_stops(self):
         self.assertEqual(self.events["latest"]["sample"]["latitude"], 2)
         self.assertEqual(self.events["latest"]["stops"], 1)
