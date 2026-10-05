@@ -55,6 +55,18 @@ class LocationTests(unittest.TestCase):
         self.assertEqual(result["state"]["error"]["kind"], "permission")
         self.assertIn("disabled", result["state"]["error"]["message"])
 
+    def test_main_queue_callers_can_complete_synchronous_waits(self):
+        for key in ("main_queue_status", "main_queue_current"):
+            with self.subTest(operation=key):
+                result = self.events[key]
+                self.assertTrue(result["state"]["done"])
+                self.assertIsNone(result["state"]["error"])
+                self.assertEqual(result["queries"], 1)
+                self.assertFalse(result["queried_on_main"])
+                self.assertFalse(result["manager_off_main"])
+        self.assertEqual(self.events["main_queue_status"]["state"]["result"]["permission"], "authorized")
+        self.assertEqual(self.events["main_queue_current"]["state"]["result"]["latitude"], 42)
+
     def test_cancelling_pending_services_query_prevents_late_startup(self):
         for key in ("services_cancelled", "services_status_cancelled"):
             with self.subTest(operation=key):

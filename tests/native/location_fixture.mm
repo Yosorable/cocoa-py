@@ -162,6 +162,30 @@ static NSDictionary *servicesCase(NSString *operation, BOOL enabled, BOOL cancel
         @"queried_on_main": @(servicesOnMain.load()), @"manager_off_main": @(managerOffMain.load()),
         @"managers": @(managerCreations.load()), @"starts": @(starts), @"released": @(released), @"state": snapshot };
 }
+static NSDictionary *mainQueueCase(NSString *operation) {
+    __block NSDictionary *result;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        servicesQueries = 0; servicesOnMain = false; managerOffMain = false;
+        servicesEnabled = YES;
+        CocoaPyRequest *pending = CocoaPyLocation(operation,
+            @{ @"max_age": @15, @"capacity": @2, @"accuracy": @10, @"distance_filter": @25 });
+        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:0.5];
+        while (!pending.done && deadline.timeIntervalSinceNow > 0) {
+            // Use the production wait, as Python does while releasing the GIL.
+            CocoaPyWaitSemaphore(pending.signal, 0.01);
+            if ([pending isKindOfClass:CocoaPyLocationRequest.class]) {
+                CocoaPyLocationRequest *location = (CocoaPyLocationRequest *)pending;
+                if (location.started)
+                    [location locationManager:(id)location.manager didUpdateLocations:@[fix(42, 0)]];
+            }
+        }
+        result = @{ @"state": [pending snapshot:NO], @"queries": @(servicesQueries.load()),
+            @"queried_on_main": @(servicesOnMain.load()), @"manager_off_main": @(managerOffMain.load()) };
+        [pending close];
+    });
+    pumpUntil(^BOOL { return result != nil; });
+    return result;
+}
 int main() {
     @autoreleasepool {
         NSMutableDictionary *results = [NSMutableDictionary dictionary];
@@ -318,6 +342,8 @@ int main() {
         results[@"services_status_cancelled"] = servicesCase(@"location.status", YES, YES);
         results[@"services_error"] = servicesCase(@"location.status", YES, NO, YES);
         results[@"services_manager_error"] = servicesCase(@"location.current", YES, NO, NO, YES);
+        results[@"main_queue_status"] = mainQueueCase(@"location.status");
+        results[@"main_queue_current"] = mainQueueCase(@"location.current");
         servicesQueries = 0; servicesEnabled = NO; initialAuthorization = kCLAuthorizationStatusDenied;
         value = (CocoaPyLocationRequest *)CocoaPyLocation(@"location.request_permission", @{});
         results[@"permission_without_services_query"] = @{ @"queries": @(servicesQueries.load()), @"state": state(value) };

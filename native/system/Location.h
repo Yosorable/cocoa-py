@@ -43,11 +43,14 @@ static void CocoaPyLocationServices(CocoaPyRequest *request, void (^completion)(
             if (request.closed || request.done) return;
             @try {
                 BOOL enabled = CLLocationManager.locationServicesEnabled;
-                dispatch_async(dispatch_get_main_queue(), ^{
+                // A synchronous Python call may itself occupy the main queue.
+                // Its nested run loop can run this block without reentering that queue.
+                CFRunLoopPerformBlock(CFRunLoopGetMain(), kCFRunLoopCommonModes, ^{
                     if (request.closed || request.done) return;
                     @try { completion(enabled); }
                     @catch (NSException *exception) { [request fail:@"runtime" message:exception.reason]; }
                 });
+                CFRunLoopWakeUp(CFRunLoopGetMain());
             } @catch (NSException *exception) {
                 [request fail:@"runtime" message:exception.reason];
             }

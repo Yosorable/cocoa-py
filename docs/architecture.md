@@ -55,8 +55,10 @@ does not treat unread stream samples as a completed operation.
 Location Services availability checks run on a background queue so their system
 queries do not block the UI thread. Location manager creation, authorization
 requests and delegate callbacks remain on the main run loop. Python calls keep
-their synchronous interface through the request wait loop; closing a request
-during an availability check prevents its later completion from starting updates.
+their synchronous interface through the request wait loop. Availability results
+are delivered through the run loop so waits can complete even when Python was
+called from a main-queue task. Closing a request during an availability check
+prevents its later completion from starting updates.
 
 Each system request owns its resources or a subscription to a shared resource.
 Motion streams share one native manager and the sampling source for each sensor,
