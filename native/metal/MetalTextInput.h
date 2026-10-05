@@ -118,6 +118,7 @@ static NSTextAlignment inputAlignment(NSString *alignment) {
 - (void)editingBegan;
 - (void)editingEnded;
 - (void)submit;
+- (void)cancel;
 - (void)enqueue:(NSString *)kind;
 - (NSDictionary *)state;
 - (BOOL)shouldChangeRange:(NSRange)range replacement:(NSString *)replacement;
@@ -305,6 +306,12 @@ static NSMutableDictionary<NSNumber *, NSValue *> *gInputKeyboardFrames;
     [self enqueue:@"submit"];
     NSString *behavior = self.options[@"submit_behavior"];
     if ([behavior isEqualToString:@"blur"]) [self endEditing];
+}
+
+- (void)cancel {
+    if (self.closed || !self.focused || self.marking || self.markedRange.location != NSNotFound) return;
+    [self endEditing];
+    [self enqueue:@"cancel"];
 }
 
 - (void)close {

@@ -315,7 +315,7 @@
     if (command == @selector(insertTab:) || command == @selector(insertBacktab:)) {
         [self enqueue:command == @selector(insertTab:) ? @"next" : @"previous"]; return YES;
     }
-    if (command == @selector(cancelOperation:)) { [self endEditing]; return YES; }
+    if (command == @selector(cancelOperation:)) { [self cancel]; return YES; }
     return NO;
 }
 - (BOOL)textView:(NSTextView *)view doCommandBySelector:(SEL)command { return [self inputEditor:view command:command]; }

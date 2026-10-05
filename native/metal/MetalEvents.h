@@ -40,7 +40,9 @@ static void metalResetInput(WindowRecord &window, const char *reason, bool queue
     ++window.inputEpoch;
     window.touchQueue.clear();
     window.scrollQueue.clear();
+    window.pointerQueue.clear();
     window.touchIdMap.clear();
+    window.touchButtonMap.clear();
     window.pressedKeys.clear();
     auto &queue = window.platformQueue;
     queue.erase(std::remove_if(queue.begin(), queue.end(), [](const auto &event) { return event.kind == 0; }), queue.end());
@@ -55,6 +57,25 @@ static void metalResetInput(WindowRecord &window, const char *reason, bool queue
         queue.push_back(std::move(event));
     }
     if (window.vsyncSemaphore) dispatch_semaphore_signal(window.vsyncSemaphore);
+}
+
+// Hover has its own queue, so it never creates a touch or captures a control.
+static void metalQueuePointer(long long handle, PointerEvent event) {
+    std::lock_guard<std::mutex> lock(gStateMutex);
+    auto found = gWindows.find(handle);
+    if (found == gWindows.end()) return;
+    auto &window = found->second;
+    if (!window.active || !window.foreground || !window.focused) return;
+    event.epoch = window.inputEpoch;
+    auto &queue = window.pointerQueue;
+    if (event.phase == 1 && !queue.empty() && queue.back().phase == 1) {
+        event.prevX = queue.back().prevX;
+        event.prevY = queue.back().prevY;
+        queue.back() = event;
+    } else {
+        if (queue.size() >= 4096) queue.erase(queue.begin());
+        queue.push_back(event);
+    }
 }
 
 static void metalPublishState(long long handle, bool active, bool foreground, bool focused) {
@@ -277,6 +298,34 @@ static PyObject *metal_window_state(PyObject *, PyObject *args) {
     auto it = gWindows.find(handle);
     if (it == gWindows.end()) { PyErr_SetString(PyExc_KeyError, "Window handle not found."); return nullptr; }
     return metalWindowState(it->second);
+}
+
+static PyObject *metal_window_fullscreen(PyObject *, PyObject *args) {
+    long long handle;
+    int requested = -1;
+    if (!PyArg_ParseTuple(args, "L|p", &handle, &requested)) return nullptr;
+    __block bool found = false, fullscreen = true;
+    runOnMainSync(^{
+        CocoaPyMetalViewController *controller = nil;
+        {
+            std::lock_guard<std::mutex> lock(gStateMutex);
+            auto it = gWindows.find(handle);
+            if (it == gWindows.end()) return;
+            auto window = &it->second;
+            found = true;
+            controller = window->controller;
+#if !COCOA_PY_UIKIT
+            fullscreen = (window->window.styleMask & NSWindowStyleMaskFullScreen) != 0;
+#endif
+        }
+#if !COCOA_PY_UIKIT
+        // Toggling can synchronously call AppKit delegates; never hold the state lock.
+        if (requested != -1) [controller requestFullscreen:requested != 0];
+#endif
+    });
+    if (!found) { PyErr_SetString(PyExc_KeyError, "Window handle not found."); return nullptr; }
+    if (requested != -1) Py_RETURN_NONE;
+    return PyBool_FromLong(fullscreen);
 }
 
 static PyObject *metal_keyboard_events(PyObject *, PyObject *args) {

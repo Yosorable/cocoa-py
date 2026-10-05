@@ -24,6 +24,7 @@ KIND_RRECT = 3
 KIND_STROKE_RRECT = 4
 KIND_LINE = 5
 KIND_PARTICLE = 7  # matches C accel KIND_PARTICLE
+KIND_TEX_ADDITIVE = 8
 
 @dataclass(slots=True)
 class Cmd:
@@ -510,12 +511,15 @@ class Renderer:
 
 
     def _scene_pipeline(self, name, clipped=False):
-        if not clipped:
+        if not clipped and "_add" not in name:
             return getattr(self, "_" + name)
-        pipeline = self._clipped_pipelines.get(name)
+        key = (name, clipped)
+        pipeline = self._clipped_pipelines.get(key)
         if pipeline is None:
             multisample = name.endswith("_ms")
             base = name.removesuffix("_ms")
+            additive = base.endswith("_add")
+            base = base.removesuffix("_add")
             if base.startswith("pp"):
                 vertex = "particle_vs"
                 fragment = "particle_tex_fs" if base == "pp_tex" else "particle_fs"
@@ -525,12 +529,13 @@ class Renderer:
                 vertex = "quad_vertex"
                 fragment = "tex_frag" if base == "tp" else "shape_frag"
             pipeline = Pipeline(
-                self._lib, vertex=vertex, fragment=fragment + "_clipped",
+                self._lib, vertex=vertex, fragment=fragment + ("_clipped" if clipped else ""),
                 premultiplied=True, blending=base not in ("vpn", "vs"),
+                blend_mode="additive" if additive else "alpha",
                 sample_count=self._msaa if multisample else 1,
                 stencil_format="stencil8" if multisample else None,
                 color_write=base != "vs")
-            self._clipped_pipelines[name] = pipeline
+            self._clipped_pipelines[key] = pipeline
         return pipeline
 
     def _clip_buffers(self, clips, resolution, target, slot):
@@ -670,7 +675,7 @@ class Renderer:
                         f.set_vertex_buffer(ub, 1)
                         f.set_fragment_buffer(qb, 0)
                         last_mode = 'quad'
-                    p = self._scene_pipeline(("tp" if is_tex else "sp") + ("_ms" if use_msaa_pass else ""), clipped)
+                    p = self._scene_pipeline(("tp_add" if is_tex == 2 else "tp" if is_tex else "sp") + ("_ms" if use_msaa_pass else ""), clipped)
                     f.set_pipeline(p)
                     if is_tex and tex is not None: f.set_fragment_texture(tex, 0)
                     f.draw("triangle", start * _VPQ, (end_or_idx - start) * _VPQ)
@@ -698,7 +703,7 @@ class Renderer:
                 flush()
                 batches.append((-2, cmd._emitter, False, None))
                 continue
-            key = (cmd.kind == KIND_TEX, cmd.texture)
+            key = (2 if cmd.kind == KIND_TEX_ADDITIVE else cmd.kind == KIND_TEX, cmd.texture)
             if pending != key:
                 flush()
                 pending, start = key, count

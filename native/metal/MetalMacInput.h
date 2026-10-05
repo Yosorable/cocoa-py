@@ -45,7 +45,8 @@ static unsigned metalMacModifiers(NSEventModifierFlags flags) {
     NSPoint previous = phase == 0 ? point : self.previousPointer;
     self.previousPointer = point;
     if (record.touchQueue.size() >= 4096) { metalResetInput(record, "overflow"); return; }
-    record.touchQueue.push_back({phase, identifier, point.x, point.y, previous.x, previous.y, event.timestamp, record.inputEpoch});
+    record.touchQueue.push_back({phase, identifier, point.x, point.y, previous.x, previous.y, event.timestamp, record.inputEpoch,
+                                (int)event.buttonNumber, 1});
     if (phase >= 2) record.touchIdMap.erase(key);
 }
 - (void)mouseDown:(NSEvent *)event { [self cocoaPointer:event phase:0]; }
@@ -54,6 +55,18 @@ static unsigned metalMacModifiers(NSEventModifierFlags flags) {
 - (void)rightMouseDown:(NSEvent *)event { [self cocoaPointer:event phase:0]; }
 - (void)rightMouseDragged:(NSEvent *)event { [self cocoaPointer:event phase:1]; }
 - (void)rightMouseUp:(NSEvent *)event { [self cocoaPointer:event phase:2]; }
+- (void)otherMouseDown:(NSEvent *)event { [self cocoaPointer:event phase:0]; }
+- (void)otherMouseDragged:(NSEvent *)event { [self cocoaPointer:event phase:1]; }
+- (void)otherMouseUp:(NSEvent *)event { [self cocoaPointer:event phase:2]; }
+- (void)cocoaHover:(NSEvent *)event phase:(int)phase {
+    NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+    NSPoint previous = phase == 0 ? point : self.previousPointer;
+    self.previousPointer = point;
+    metalQueuePointer(self.windowHandle, {phase, point.x, point.y, previous.x, previous.y, event.timestamp});
+}
+- (void)mouseEntered:(NSEvent *)event { [self cocoaHover:event phase:0]; }
+- (void)mouseMoved:(NSEvent *)event { [self cocoaHover:event phase:1]; }
+- (void)mouseExited:(NSEvent *)event { [self cocoaHover:event phase:2]; }
 - (void)scrollWheel:(NSEvent *)event {
     NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
     double unit = event.hasPreciseScrollingDeltas ? 1.0 : 16.0;

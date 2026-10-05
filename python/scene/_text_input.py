@@ -130,7 +130,7 @@ class _TextInputState:
                  return_key="done", autocapitalization="sentences", autocorrection=True,
                  spell_check=True, content_type=None, keyboard_appearance="default",
                  avoid_keyboard=True, select_all_on_focus=False, submit_behavior="blur",
-                 on_change=None, on_submit=None, on_focus=None, on_blur=None,
+                 on_change=None, on_submit=None, on_focus=None, on_blur=None, on_cancel=None,
                  on_selection_change=None, **kw):
         self._options = {}
         self._revision = 0
@@ -159,7 +159,7 @@ class _TextInputState:
         for name, option in vars(_TextInputState).items():
             if isinstance(option, _Option):
                 setattr(self, name, values[name])
-        for name in ("on_change", "on_submit", "on_focus", "on_blur", "on_selection_change"):
+        for name in ("on_change", "on_submit", "on_focus", "on_blur", "on_cancel", "on_selection_change"):
             callback = values[name]
             if callback is not None and not callable(callback):
                 raise TypeError(f"{name} must be callable or None")
@@ -332,7 +332,7 @@ class _TextInputState:
         if kind == "focus" and self._input_scene is not None:
             self._input_scene._focus_manager.dispatch()
         callback = getattr(self, {"change": "on_change", "selection": "on_selection_change",
-                                 "focus": "on_focus", "blur": "on_blur", "submit": "on_submit"}.get(kind, ""), None)
+                                 "focus": "on_focus", "blur": "on_blur", "submit": "on_submit", "cancel": "on_cancel"}.get(kind, ""), None)
         if callback is not None:
             callback(self)
         if kind in ("next", "previous") or (kind == "submit" and self.submit_behavior == "next"):
@@ -443,7 +443,7 @@ class TextInputSession(_TextInputState):
         allowed = {"enabled", "read_only", "max_length", "keyboard_type", "return_key",
                    "autocapitalization", "autocorrection", "spell_check", "content_type",
                    "keyboard_appearance", "select_all_on_focus", "submit_behavior",
-                   "on_change", "on_submit", "on_focus", "on_blur", "on_selection_change"}
+                   "on_change", "on_submit", "on_focus", "on_blur", "on_cancel", "on_selection_change"}
         unknown = options.keys() - allowed
         if unknown:
             raise TypeError(f"Unknown TextInputSession options: {', '.join(sorted(unknown))}")

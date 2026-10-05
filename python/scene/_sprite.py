@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import json
 import math
+import struct
 from collections import namedtuple
 from pathlib import Path
 
 from . import gpu
 from .gpu import Texture
 from ._common import _apply, _avg_scale, _color, _rot
-from ._engine import Cmd, KIND_TEX, _quad_verts_uv
+from ._engine import Cmd, KIND_TEX, KIND_TEX_ADDITIVE, _quad_verts_uv
 from ._node import Node
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -95,8 +96,9 @@ class Sprite(Node):
     """
 
     def __init__(self, source, *, size=None, anchor=(0.5, 0.5),
-                 flip_x=False, flip_y=False, tint=(1, 1, 1, 1), **kw):
+                 flip_x=False, flip_y=False, tint=(1, 1, 1, 1), blend="alpha", **kw):
         super().__init__(**kw)
+        self.blend = blend
         self._texture_path: str | None = None
         if isinstance(source, SpriteFrame):
             self.texture = source.texture
@@ -157,6 +159,17 @@ class Sprite(Node):
     def playing(self):
         return self._anim_frames is not None
 
+    @property
+    def blend(self):
+        """Compositing mode: ``'alpha'`` or ``'additive'``."""
+        return "additive" if self._additive else "alpha"
+
+    @blend.setter
+    def blend(self, value):
+        if value not in ("alpha", "additive"):
+            raise ValueError("blend must be 'alpha' or 'additive'")
+        self._additive = value == "additive"
+
     def _tick_self(self, dt):
         if self._anim_frames:
             self._anim_time += dt
@@ -201,7 +214,7 @@ class Sprite(Node):
         return (self.x, self.y, self.rotation, self.scale, self.opacity, self.z,
                 self.texture._handle if self.texture else None,
                 self.sprite_size, self.anchor, self.flip_x, self.flip_y,
-                self.tint, self._uv_rect)
+                self.tint, self._uv_rect, self._additive)
 
     def _bounds(self):
         w, h = self.sprite_size
@@ -248,12 +261,23 @@ class Sprite(Node):
         if self.flip_y:
             v0, v1 = v1, v0
 
+        # Preserve the full inherited affine transform. Reconstructing a quad
+        # from rotation and axis lengths loses shear and reflected winding.
+        x0, y0 = -ax * self.sprite_size[0], -ay * self.sprite_size[1]
+        x1, y1 = x0 + self.sprite_size[0], y0 + self.sprite_size[1]
+        corners = ((x0, y0, u0, v0), (x1, y0, u1, v0), (x0, y1, u0, v1),
+                   (x1, y0, u1, v0), (x1, y1, u1, v1), (x0, y1, u0, v1))
+        vertices = []
+        for x, y, u, v in corners:
+            wx, wy = _apply(world, (x, y))
+            vertices.extend((wx, wy, u, v))
+
         order[0] += 1
-        cmds.append(Cmd(self.z, order[0], KIND_TEX,
+        cmds.append(Cmd(self.z, order[0], KIND_TEX_ADDITIVE if self._additive else KIND_TEX,
             center[0], center[1], hw, hh, rot,
             (KIND_TEX, 0, 0, 0), (0, 0, opacity, 0),
             (0, 0, 0, 0), self.tint, self.texture,
-            _vb=_quad_verts_uv(center[0], center[1], hw, hh, rot, u0, v0, u1, v1)))
+            _vb=struct.pack('<24f', *vertices)))
 
     def close(self):
         if self._texture_path is not None:

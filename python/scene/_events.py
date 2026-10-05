@@ -95,6 +95,7 @@ class PlatformInput:
     def cancel_interactions(self, *, blur_text=True):
         scene = self.scene
         self.cancel_keys()
+        scene._cancel_hover()
         scene._pointer_router.cancel_all()
         scene._focus_manager.clear()
         scene._ensure_ui_nodes()

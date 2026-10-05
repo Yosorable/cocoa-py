@@ -71,6 +71,16 @@ class ParticleEmitter(Node):
         self._rand = __import__('random').Random()
 
     @property
+    def blend(self):
+        return self._blend
+
+    @blend.setter
+    def blend(self, value):
+        if value not in ("alpha", "additive"):
+            raise ValueError("blend must be 'alpha' or 'additive'")
+        self._blend = value
+
+    @property
     def colors(self):
         return self._color_strs
 
@@ -195,11 +205,14 @@ class ParticleEmitter(Node):
             res[0], res[1], self._time, gx, gy, opacity, 0, 0,
             *transform, 0, 0))
         tex = self.texture
+        name = "pp_tex" if tex is not None else "pp"
+        if self.blend == "additive":
+            name += "_add"
+        if msaa:
+            name += "_ms"
+        frame.set_pipeline(renderer._scene_pipeline(name, clipped))
         if tex is not None:
-            frame.set_pipeline(renderer._scene_pipeline("pp_tex_ms" if msaa else "pp_tex", clipped))
             frame.set_fragment_texture(tex, 0)
-        else:
-            frame.set_pipeline(renderer._scene_pipeline("pp_ms" if msaa else "pp", clipped))
         frame.set_vertex_buffer(self._pbuf, 0)
         frame.set_vertex_buffer(self._ubuf, 1)
         frame.draw_instanced("triangle", 0, 6, self.max_particles)

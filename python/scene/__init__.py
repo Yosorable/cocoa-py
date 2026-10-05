@@ -2,7 +2,7 @@
 
 from . import action, gesture, gpu, transition
 from ._common import (
-    Alignment, CollisionInfo, FillRule, LineCap, LineJoin, Orientation, Touch,
+    Alignment, CollisionInfo, FillRule, LineCap, LineJoin, Orientation, PointerEvent, ScrollEvent, Touch,
     TouchPhase, linear_gradient, radial_gradient, radial_point,
 )
 from ._node import Group, Layer, Node
@@ -16,7 +16,7 @@ from ._text import Image, Label
 from ._controls import Button, ControlStyle, Slider, Toggle
 from ._events import KeyEvent, WindowState
 from ._text_input import TextField, TextView, TextInputSession
-from ._sprite import NineSlice, Sprite, SpriteAtlas
+from ._sprite import NineSlice, Sprite, SpriteAtlas, SpriteFrame
 from ._particle import ParticleEmitter
 from ._tilemap import TileMap, TileSet, load_tiled
 from ._shader import ShaderNode

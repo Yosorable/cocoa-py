@@ -99,12 +99,12 @@ class Pipeline:
     def __init__(self, library: Library, *, vertex: str, fragment: str,
                  blending=True, premultiplied=False,
                  format="bgra8", depth_format=None, sample_count=1,
-                 stencil_format=None, color_write=True):
+                 stencil_format=None, color_write=True, blend_mode="alpha"):
         self._handle = _metal.create_render_pipeline(
             library=library.handle, vertex=vertex, fragment=fragment,
             blending=blending, premultiplied=premultiplied,
             format=format, depth_format=depth_format, sample_count=sample_count,
-            stencil_format=stencil_format, color_write=color_write)
+            stencil_format=stencil_format, color_write=color_write, blend_mode=blend_mode)
 
     @property
     def handle(self):
@@ -505,6 +505,18 @@ class Window:
     def consume_platform_events(self):
         return _metal.consume_platform_events(self._handle)
 
+    @property
+    def fullscreen(self):
+        """Actual macOS fullscreen state; UIKit presentation always returns True."""
+        return _metal.window_fullscreen(self._handle)
+
+    @fullscreen.setter
+    def fullscreen(self, value):
+        """Request a macOS fullscreen transition. UIKit keeps host presentation."""
+        if not isinstance(value, bool):
+            raise TypeError("fullscreen must be a bool")
+        _metal.window_fullscreen(self._handle, value)
+
     def enable_key_events(self, enabled=True):
         _metal.keyboard_events(self._handle, bool(enabled))
 
@@ -518,6 +530,10 @@ class Window:
     def consume_scrolls(self):
         """Return and clear mouse/trackpad scrolling deltas in viewport points."""
         return _metal.consume_scrolls(self._handle)
+
+    def consume_pointer_events(self):
+        """Return and clear pointer entered/moved/exited events in viewport points."""
+        return _metal.consume_pointer_events(self._handle)
 
     def should_close(self) -> bool:
         return self.consume_actions().get("close", 0) > 0

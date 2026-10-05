@@ -35,6 +35,7 @@ enum {
     KIND_LINE = 5,
     KIND_MESH = 6,
     KIND_PARTICLE = 7,
+    KIND_TEX_ADDITIVE = 8,
 };
 
 #define COLL_CIRCLE 0
@@ -69,7 +70,7 @@ static PyObject *s_text, *s_size, *s_font;
 static PyObject *s_texture, *s_img_size;
 static PyObject *s__handle;
 /* Sprite */
-static PyObject *s_sprite_size, *s_anchor, *s_flip_x, *s_flip_y, *s_tint, *s__uv_rect;
+static PyObject *s_sprite_size, *s_anchor, *s_flip_x, *s_flip_y, *s_tint, *s__uv_rect, *s__additive;
 /* World transform export */
 static PyObject *s__world_transform, *s__world_opacity;
 static PyObject *s__clip, *s__clip_state, *s__world_clips;
@@ -126,6 +127,7 @@ static int intern_strings(void) {
     INTERN(s_text_texture, "text_texture"); INTERN(s_parent, "parent");
     INTERN(s_sprite_size, "sprite_size"); INTERN(s_anchor, "anchor");
     INTERN(s_flip_x, "flip_x"); INTERN(s_flip_y, "flip_y");
+    INTERN(s__additive, "_additive");
     INTERN(s_tint, "tint"); INTERN(s__uv_rect, "_uv_rect");
     INTERN(s__world_transform, "_world_transform"); INTERN(s__world_opacity, "_world_opacity");
     INTERN(s__clip, "_clip"); INTERN(s__clip_state, "_clip_state");
@@ -1590,6 +1592,7 @@ static void emit_sprite(PyObject *node, CNodeCache *cache, CollectState *st,
 
     int fx = read_bool(node, s_flip_x);
     int fy = read_bool(node, s_flip_y);
+    int additive = read_bool(node, s__additive);
 
     PyObject *tint_obj = PyObject_GetAttr(node, s_tint);
     float tint[4] = {1,1,1,1};
@@ -1609,16 +1612,6 @@ static void emit_sprite(PyObject *node, CNodeCache *cache, CollectState *st,
     if (fx) { float tmp = u0; u0 = u1; u1 = tmp; }
     if (fy) { float tmp = v0_; v0_ = v1_; v1_ = tmp; }
 
-    double off_x = (0.5 - ax) * sw_;
-    double off_y = (0.5 - ay) * sh_;
-    double cx_, cy_;
-    c_apply(world, off_x, off_y, &cx_, &cy_);
-    double sx = hypot(world[0], world[1]);
-    double sy = hypot(world[2], world[3]);
-    float hw = (float)(sw_ * sx / 2);
-    float hh = (float)(sh_ * sy / 2);
-    float rot = (float)c_rot(world);
-
     int old_cmd_count = cache->cmd_count;
     cache->cmd_count = 0;
 
@@ -1626,8 +1619,25 @@ static void emit_sprite(PyObject *node, CNodeCache *cache, CollectState *st,
     st->order++;
     cmd->z = cache->base[6];
     cmd->order = st->order;
-    cmd->kind = KIND_TEX;
-    pack_verts_uv((float)cx_, (float)cy_, hw, hh, rot, u0, v0_, u1, v1_, cmd->vb);
+    cmd->kind = additive ? KIND_TEX_ADDITIVE : KIND_TEX;
+    /* Transform the actual local corners: axis lengths and rotation alone
+       cannot represent inherited shear or reflected winding. */
+    double x0 = -ax * sw_, y0 = -ay * sh_;
+    double x1 = x0 + sw_, y1 = y0 + sh_;
+    const double corners[6][4] = {
+        {x0, y0, u0, v0_}, {x1, y0, u1, v0_}, {x0, y1, u0, v1_},
+        {x1, y0, u1, v0_}, {x1, y1, u1, v1_}, {x0, y1, u0, v1_}
+    };
+    float vertices[24];
+    for (int i = 0; i < 6; i++) {
+        double x, y;
+        c_apply(world, corners[i][0], corners[i][1], &x, &y);
+        vertices[4*i] = (float)x;
+        vertices[4*i+1] = (float)y;
+        vertices[4*i+2] = (float)corners[i][2];
+        vertices[4*i+3] = (float)corners[i][3];
+    }
+    memcpy(cmd->vb, vertices, sizeof(vertices));
     float p[4] = {(float)KIND_TEX, 0, 0, 0};
     float sty[4] = {0, 0, (float)op, 0};
     float fill_[4] = {0, 0, 0, 0};
@@ -1648,10 +1658,10 @@ static void emit_sprite(PyObject *node, CNodeCache *cache, CollectState *st,
     cache->colors[1] = tint_obj; Py_XINCREF(tint_obj);
     cache->color_count = 2;
 
-    /* shape: sprite_size[2], anchor[2], flip[2], uv_rect[4] = 10 doubles */
-    double shape[10] = { sw_, sh_, ax, ay, (double)fx, (double)fy, (double)u0, (double)v0_, (double)u1, (double)v1_ };
+    /* Include compositing mode in cached geometry validation. */
+    double shape[11] = { sw_, sh_, ax, ay, (double)fx, (double)fy, (double)u0, (double)v0_, (double)u1, (double)v1_, (double)additive };
     memcpy(cache->shape, shape, sizeof(shape));
-    cache->shape_len = 10;
+    cache->shape_len = 11;
 
     Py_XDECREF(tex_obj);
     Py_XDECREF(tint_obj);
@@ -2390,8 +2400,8 @@ static void collect_recursive(PyObject *node, const double ptf[6], double pop,
                     v1_ = PyFloat_AsDouble(PyTuple_GET_ITEM(uvr,3));
                 }
                 if (PyErr_Occurred()) PyErr_Clear();
-                double sh[10] = {sw_,sh_,ax_,ay_,(double)fx,(double)fy,u0,v0_,u1,v1_};
-                if (memcmp(sh, cache->shape, 10*sizeof(double)) != 0) hit = 0;
+                double sh[11] = {sw_,sh_,ax_,ay_,(double)fx,(double)fy,u0,v0_,u1,v1_,(double)read_bool(node, s__additive)};
+                if (memcmp(sh, cache->shape, sizeof(sh)) != 0) hit = 0;
                 Py_XDECREF(ssz); Py_XDECREF(anch); Py_XDECREF(uvr);
             }
             Py_XDECREF(t); Py_XDECREF(tn);
@@ -3019,8 +3029,8 @@ static PyObject *accel_collect(PyObject *self, PyObject *args) {
                 /* Flush pending quad batch */
                 if (bs >= 0 && pk_tex >= 0) {
                     PyObject *tex_py = pk_tobj ? pk_tobj : Py_None;
-                    PyObject *item = Py_BuildValue("(iiOO)", quad_idx[bs], qi > 0 ? quad_idx[i - 1] + 1 : 0,
-                        pk_tex ? Py_True : Py_False, tex_py);
+                    PyObject *item = Py_BuildValue("(iiiO)", quad_idx[bs], qi > 0 ? quad_idx[i - 1] + 1 : 0,
+                        pk_tex, tex_py);
                     PyList_Append(batches, item);
                     Py_DECREF(item);
                     bs = -1; pk_tex = -1; pk_tobj = NULL;
@@ -3046,15 +3056,15 @@ static PyObject *accel_collect(PyObject *self, PyObject *args) {
             }
             if (i < n && !is_mesh && !is_particle) {
                 /* Quad cmd */
-                int cur_tex = (st.cmds[i].kind == KIND_TEX);
+                int cur_tex = st.cmds[i].kind == KIND_TEX_ADDITIVE ? 2 : (st.cmds[i].kind == KIND_TEX);
                 PyObject *cur_tobj = st.cmds[i].texture;
                 if (bs < 0) {
                     bs = i; pk_tex = cur_tex; pk_tobj = cur_tobj;
                 } else if (cur_tex != pk_tex || cur_tobj != pk_tobj) {
                     /* Flush and start new quad batch */
                     PyObject *tex_py = pk_tobj ? pk_tobj : Py_None;
-                    PyObject *item = Py_BuildValue("(iiOO)", quad_idx[bs], quad_idx[i - 1] + 1,
-                        pk_tex ? Py_True : Py_False, tex_py);
+                    PyObject *item = Py_BuildValue("(iiiO)", quad_idx[bs], quad_idx[i - 1] + 1,
+                        pk_tex, tex_py);
                     PyList_Append(batches, item);
                     Py_DECREF(item);
                     bs = i; pk_tex = cur_tex; pk_tobj = cur_tobj;

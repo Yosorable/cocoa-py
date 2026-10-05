@@ -5,12 +5,13 @@ from pathlib import Path
 import subprocess
 import sysconfig
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from _cocoa import _metal
-from scene import Button, KeyEvent, Layer, Rect, Scene, ScrollView, Slider, TextField, Touch, TouchPhase, WindowState, gpu
+from scene import Button, KeyEvent, Layer, PointerEvent, Rect, Scene, ScrollEvent, ScrollView, Slider, TextField, Touch, TouchPhase, WindowState, gpu
 from scene._scene import _SceneDirector
 
 
@@ -27,6 +28,56 @@ class EventModelTests(unittest.TestCase):
 
     def key(self, phase, key="a", code=4, **kwargs):
         self.scene._platform_input.feed_key(dict(key=key, code=code, phase=phase, modifiers=0, timestamp=1., **kwargs))
+
+    def test_hover_is_not_a_touch_and_stale_epochs_do_not_move_the_pointer(self):
+        events, touches = [], []
+        self.scene.pointer_moved = events.append
+        self.scene.touch_began = touches.append
+        raw = dict(x=40., y=50., prev_x=30., prev_y=50., phase="moved", timestamp=1., epoch=0)
+        self.window.consume_pointer_events = lambda: [raw]
+        self.scene._process_touches()
+        self.assertEqual(events, [PointerEvent((40, 50), (30, 50), "moved", 1)])
+        self.assertEqual(self.scene.pointer_position, (40, 50))
+        self.assertFalse(touches)
+        self.assertFalse(self.scene._pointer_router.active)
+        self.scene._platform_input.epoch = 1
+        raw["x"] = 99.
+        self.scene._process_touches()
+        self.assertEqual(self.scene.pointer_position, (40, 50))
+
+    def test_hover_is_cancelled_once_when_input_ownership_is_lost(self):
+        self.scene._last_pointer_event = PointerEvent((40, 50), (30, 50))
+        exited = []
+        self.scene.pointer_exited = exited.append
+        self.scene._platform_input.cancel_interactions()
+        self.scene._platform_input.cancel_interactions()
+        self.assertIsNone(self.scene.pointer_position)
+        self.assertEqual(len(exited), 1)
+        self.assertEqual(exited[0].phase, "exited")
+        self.assertTrue(exited[0].cancelled)
+
+    def test_secondary_pointer_is_scene_owned_and_does_not_press_controls(self):
+        clicks, touches = [], []
+        button = Button("Primary", x=100, y=100, on_click=lambda _: clicks.append(True))
+        self.scene.add(button)
+        self.scene.touch_began = touches.append
+        self.scene.touch_ended = touches.append
+        with patch.object(self.scene, "hit_test", return_value=button):
+            for phase in (TouchPhase.BEGAN, TouchPhase.ENDED):
+                self.scene._pointer_router.feed(Touch(1, (100, 100), (100, 100), phase, button=1, source="mouse"))
+        self.assertFalse(clicks)
+        self.assertFalse(button.pressed)
+        self.assertEqual([(e.button, e.source) for e in touches], [(1, "mouse"), (1, "mouse")])
+        legacy = Touch(2, (0, 0), (0, 0), TouchPhase.BEGAN)
+        self.assertEqual((legacy.button, legacy.source), (0, "touch"))
+
+    def test_unconsumed_scroll_reaches_the_scene_without_starting_a_touch(self):
+        events = []
+        self.scene.scroll = events.append
+        self.window.consume_scrolls = lambda: [dict(x=20., y=30., dx=0., dy=45., timestamp=1., precise=True, momentum=False)]
+        self.scene._process_touches()
+        self.assertEqual(events, [ScrollEvent((20, 30), (0, 45), True, False, 1)])
+        self.assertFalse(self.scene._pointer_router.active)
 
     def test_game_keys_track_physical_and_logical_holds(self):
         self.key("down")
@@ -122,6 +173,56 @@ class EventModelTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("COCOA_PY_UI_TESTS") == "1", "Enable desktop UI tests")
 class NativeEventTests(unittest.TestCase):
+    def test_appkit_hover_coalesces_motion_and_keeps_enter_exit_boundaries(self):
+        events, touches = [], []
+        self.scene.pointer_moved = events.append
+        self.scene.pointer_exited = events.append
+        self.scene.touch_began = touches.append
+        self.scene.camera.zoom = 2
+        for phase, x in (("entered", 20), ("moved", 30), ("moved", 45), ("exited", 50)):
+            self.fixture.pointer(self.window.handle, phase, x, 60)
+        self.scene._process_touches()
+        self.assertEqual([event.phase for event in events], ["entered", "moved", "exited"])
+        self.assertEqual(events[1].position, (45, 60))
+        self.assertEqual(events[1].prev_position, (20, 60))
+        self.assertFalse(touches)
+        self.assertIsNone(self.scene.pointer_position)
+
+    def test_appkit_secondary_and_middle_buttons_preserve_identity(self):
+        events, clicks = [], []
+        button = Button("Primary", x=100, y=100, on_click=lambda _: clicks.append(True))
+        self.scene.add(button)
+        self.scene._render()
+        self.assertIs(self.scene.hit_test(100, 100), button)
+        self.scene.touch_began = events.append
+        self.scene.touch_moved = events.append
+        self.scene.touch_ended = events.append
+        for number in (1, 2):
+            for phase in ("down", "dragged", "up"):
+                self.fixture.pointer(self.window.handle, phase, 100, 100, number)
+            self.scene._process_touches()
+        self.assertEqual([event.button for event in events], [1, 1, 1, 2, 2, 2])
+        self.assertTrue(all(event.source == "mouse" for event in events))
+        self.assertFalse(clicks)
+        for phase in ("down", "up"):
+            self.fixture.pointer(self.window.handle, phase, 100, 100, 0)
+        self.scene._process_touches()
+        self.scene._dispatch_ui_events()
+        self.assertEqual(clicks, [True])
+
+    def test_native_focus_loss_discards_queued_hover_and_cancels_current_hover(self):
+        events = []
+        self.scene.pointer_exited = events.append
+        self.fixture.pointer(self.window.handle, "entered", 20, 30)
+        self.scene._process_touches()
+        self.assertEqual(self.scene.pointer_position, (20, 30))
+        self.fixture.pointer(self.window.handle, "moved", 100, 120)
+        self.lifecycle("blur")
+        self.assertIsNone(self.scene.pointer_position)
+        self.assertEqual(len(events), 1)
+        self.assertTrue(events[0].cancelled)
+        self.assertFalse(self.window.consume_pointer_events())
+
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory(prefix="cocoa-py-events-")
@@ -165,6 +266,41 @@ class NativeEventTests(unittest.TestCase):
         self.assertEqual([(event.key, event.code, event.phase, event.repeat) for event in self.events],
                          [("a", 4, "down", False), ("a", 4, "down", True), ("a", 4, "up", False)])
         self.assertFalse(self.scene.keys_down)
+
+    def test_fullscreen_roundtrip_preserves_scene_and_window_size(self):
+        self.assertFalse(self.scene.fullscreen)
+        original_size = self.window.size
+        for requested in (True, False):
+            self.scene.fullscreen = requested
+            self.scene.fullscreen = requested
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                self.window.consume_actions()
+                self.window.sync()
+                if self.scene.fullscreen == requested:
+                    break
+                time.sleep(.01)
+            self.assertEqual(self.scene.fullscreen, requested)
+            # AppKit sets the style bit before its transition finishes.
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline:
+                self.window.consume_actions()
+                time.sleep(.01)
+        self.window.sync()
+        self.assertEqual(self.window.size, original_size)
+        self.scene._render()
+        with self.assertRaises(TypeError):
+            self.scene.fullscreen = "yes"
+
+    def test_fullscreen_request_during_transition_keeps_the_latest_target(self):
+        self.scene.fullscreen = True
+        self.scene.fullscreen = False
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            self.window.consume_actions()
+            time.sleep(.01)
+        self.assertFalse(self.scene.fullscreen)
+        self.scene._render()
 
     def test_left_and_right_modifiers_are_independent(self):
         self.key("flags", code=56, text="", flags=0x20000 | 2)

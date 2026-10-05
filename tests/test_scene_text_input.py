@@ -136,6 +136,20 @@ class TextInputNativeTests(unittest.TestCase):
         field.redo(); process_inputs(self.scene)
         self.assertEqual(field.text, "A中文B")
 
+    def test_escape_reports_cancel_after_blur_and_preserves_text(self):
+        for cls in (TextField, TextView):
+            events = []
+            field = self.control(cls, text="Draft", on_blur=lambda c: events.append(("blur", c.focused)),
+                                 on_cancel=lambda c: events.append(("cancel", c.focused)))
+            self.native(field, "command", "cancelOperation:")
+            self.assertEqual(events, [("blur", False), ("cancel", False)])
+            self.assertEqual(field.text, "Draft")
+            field.focus(); self.scene._render(); process_inputs(self.scene)
+            events.clear()
+            field.blur(); process_inputs(self.scene)
+            self.assertEqual(events, [("blur", False)])
+            field.close()
+
     def test_native_editor_clips_without_restarting_composition(self):
         parent = Group(x=200, y=150, rotation=.25, clip=ClipRect(-50, -40, 100, 80, 15))
         field = TextField(240, 60, text="A", clip=ClipRect(-110, -30, 220, 60, 8))

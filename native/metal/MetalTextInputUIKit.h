@@ -27,6 +27,16 @@ static UIButton *inputKeyboardButton(NSString *symbol, id target, SEL action) {
 }
 
 @implementation CocoaPyInputField
+- (NSArray<UIKeyCommand *> *)keyCommands {
+    NSMutableArray<UIKeyCommand *> *commands = [NSMutableArray arrayWithArray:[super keyCommands] ?: @[]];
+    if (self.inputOwner && !self.markedTextRange) {
+        UIKeyCommand *cancel = [UIKeyCommand keyCommandWithInput:UIKeyInputEscape modifierFlags:0 action:@selector(cocoaCancelInput:)];
+        cancel.wantsPriorityOverSystemBehavior = YES;
+        [commands addObject:cancel];
+    }
+    return commands;
+}
+- (void)cocoaCancelInput:(UIKeyCommand *)command { [self.inputOwner cancel]; }
 - (CGRect)caretRectForPosition:(UITextPosition *)position {
     CocoaPySceneTextInput *owner = self.inputOwner;
     return owner.headless ? [owner.surface convertRect:owner.caretRect toView:self] : [super caretRectForPosition:position];
@@ -57,6 +67,16 @@ static UIButton *inputKeyboardButton(NSString *symbol, id target, SEL action) {
 @end
 
 @implementation CocoaPyInputView
+- (NSArray<UIKeyCommand *> *)keyCommands {
+    NSMutableArray<UIKeyCommand *> *commands = [NSMutableArray arrayWithArray:[super keyCommands] ?: @[]];
+    if (self.inputOwner && !self.markedTextRange) {
+        UIKeyCommand *cancel = [UIKeyCommand keyCommandWithInput:UIKeyInputEscape modifierFlags:0 action:@selector(cocoaCancelInput:)];
+        cancel.wantsPriorityOverSystemBehavior = YES;
+        [commands addObject:cancel];
+    }
+    return commands;
+}
+- (void)cocoaCancelInput:(UIKeyCommand *)command { [self.inputOwner cancel]; }
 - (CGRect)caretRectForPosition:(UITextPosition *)position {
     CocoaPySceneTextInput *owner = self.inputOwner;
     return owner.headless ? [owner.surface convertRect:owner.caretRect toView:self] : [super caretRectForPosition:position];

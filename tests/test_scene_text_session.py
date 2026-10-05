@@ -75,6 +75,21 @@ class SessionNativeTests(unittest.TestCase):
         session.redo(); process_inputs(self.scene)
         self.assertEqual(session.text, "A中文B")
 
+    def test_cancel_callback_can_restore_custom_dialog_input(self):
+        events = []
+        def cancelled(session):
+            events.append(session.text)
+            session.focus()
+        session = self.session(text="Name", on_cancel=cancelled)
+        self.native(session, "command", "cancelOperation:")
+        self.assertEqual(events, ["Name"])
+        self.scene._render(); process_inputs(self.scene)
+        self.assertTrue(session.focused)
+        self.native(session, "marked", "draft", 5)
+        self.native(session, "command", "cancelOperation:")
+        self.assertEqual(events, ["Name"])
+        self.assertTrue(session.focused)
+
     def test_caret_updates_preserve_composition_and_place_input_method_ui(self):
         session = self.session(max_length=2)
         self.native(session, "marked", "zhongwen", 8)

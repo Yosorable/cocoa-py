@@ -163,6 +163,14 @@ struct TouchEvent {
     double prevX, prevY;
     double timestamp;
     unsigned long long epoch = 0;
+    int button = 0;      // 0=primary, 1=secondary, 2=middle
+    int source = 0;      // 0=touch, 1=mouse/trackpad, 2=pencil
+};
+
+struct PointerEvent {
+    int phase;          // 0=entered, 1=moved, 2=exited
+    double x, y, prevX, prevY, timestamp;
+    unsigned long long epoch = 0;
 };
 
 struct ScrollEvent {
@@ -266,7 +274,9 @@ struct WindowRecord {
     __strong id<MTLCommandBuffer> offscreenCB;
     std::vector<TouchEvent> touchQueue;
     std::vector<ScrollEvent> scrollQueue;
+    std::vector<PointerEvent> pointerQueue;
     std::unordered_map<void *, long long> touchIdMap;
+    std::unordered_map<void *, int> touchButtonMap;
     long long nextTouchId = 1;
     bool active = true, foreground = true, focused = true;
     bool keyboardEvents = false;
@@ -291,7 +301,7 @@ static std::unordered_map<long long, WindowRecord> gWindows;
 #if COCOA_PY_UIKIT
 #include "MetalUIKitInput.h"
 @implementation CocoaPyMetalSurfaceView (Touch)
-- (void)_enqueueTouches:(NSSet<UITouch *> *)touches phase:(int)phase {
+- (void)_enqueueTouches:(NSSet<UITouch *> *)touches phase:(int)phase event:(UIEvent *)event {
     std::lock_guard<std::mutex> lock(gStateMutex);
     auto it = gWindows.find(self.windowHandle);
     if (it == gWindows.end()) return;
@@ -304,14 +314,14 @@ static std::unordered_map<long long, WindowRecord> gWindows;
             // began: assign new unique ID
             tid = wr.nextTouchId++;
             wr.touchIdMap[key] = tid;
+            NSUInteger mask = event.buttonMask;
+            int button = 0;
+            if (mask) while (!(mask & 1)) { ++button; mask >>= 1; }
+            wr.touchButtonMap[key] = button;
         } else {
             auto mi = wr.touchIdMap.find(key);
             if (mi == wr.touchIdMap.end()) continue;
             tid = mi->second;
-            if (phase >= 2) {
-                // ended or cancelled: remove mapping
-                wr.touchIdMap.erase(key);
-            }
         }
         CGPoint loc = [touch locationInView:self];
         CGPoint prev = [touch previousLocationInView:self];
@@ -323,21 +333,35 @@ static std::unordered_map<long long, WindowRecord> gWindows;
             phase, tid,
             loc.x, loc.y,
             prev.x, prev.y,
-            touch.timestamp, wr.inputEpoch
+            touch.timestamp, wr.inputEpoch, wr.touchButtonMap[key],
+            touch.type == UITouchTypeIndirectPointer ? 1 : touch.type == UITouchTypeStylus ? 2 : 0
         });
+        if (phase >= 2) {
+            wr.touchIdMap.erase(key);
+            wr.touchButtonMap.erase(key);
+        }
     }
 }
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    [self _enqueueTouches:touches phase:0];
+    [self _enqueueTouches:touches phase:0 event:event];
 }
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    [self _enqueueTouches:touches phase:1];
+    [self _enqueueTouches:touches phase:1 event:event];
 }
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    [self _enqueueTouches:touches phase:2];
+    [self _enqueueTouches:touches phase:2 event:event];
 }
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    [self _enqueueTouches:touches phase:3];
+    [self _enqueueTouches:touches phase:3 event:event];
+}
+- (void)cocoaHover:(UIHoverGestureRecognizer *)recognizer {
+    int phase = recognizer.state == UIGestureRecognizerStateBegan ? 0 :
+                recognizer.state == UIGestureRecognizerStateChanged ? 1 : 2;
+    CGPoint point = [recognizer locationInView:self];
+    CGPoint previous = phase == 0 ? point : self.previousPointer;
+    self.previousPointer = point;
+    metalQueuePointer(self.windowHandle, {phase, point.x, point.y, previous.x, previous.y,
+                                        NSProcessInfo.processInfo.systemUptime});
 }
 @end
 
@@ -511,6 +535,7 @@ static PyObject *metal_create_render_pipeline(PyObject *self, PyObject *args, Py
     int sampleCount = 1;
     const char *stencilFmt = nullptr;
     int colorWrite = 1;
+    const char *blendMode = "alpha";
     static char libraryKeyword[] = "library";
     static char vertexKeyword[] = "vertex";
     static char fragmentKeyword[] = "fragment";
@@ -521,13 +546,19 @@ static PyObject *metal_create_render_pipeline(PyObject *self, PyObject *args, Py
     static char sampleCountKeyword[] = "sample_count";
     static char stencilFormatKeyword[] = "stencil_format";
     static char colorWriteKeyword[] = "color_write";
+    static char blendModeKeyword[] = "blend_mode";
     static char *kwlist[] = {libraryKeyword, vertexKeyword, fragmentKeyword,
                              blendingKeyword, premultipliedKeyword,
                              formatKeyword, depthFormatKeyword, sampleCountKeyword,
-                             stencilFormatKeyword, colorWriteKeyword, nullptr};
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Lss|ppszIzp", kwlist,
+                             stencilFormatKeyword, colorWriteKeyword, blendModeKeyword, nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Lss|ppszIzps", kwlist,
             &libraryHandle, &vertex, &fragment, &blending, &premultiplied,
-            &format, &depthFmt, &sampleCount, &stencilFmt, &colorWrite)) {
+            &format, &depthFmt, &sampleCount, &stencilFmt, &colorWrite, &blendMode)) {
+        return nullptr;
+    }
+    bool additive = strcmp(blendMode, "additive") == 0;
+    if (!additive && strcmp(blendMode, "alpha") != 0) {
+        PyErr_SetString(PyExc_ValueError, "blend_mode must be 'alpha' or 'additive'.");
         return nullptr;
     }
 
@@ -565,7 +596,7 @@ static PyObject *metal_create_render_pipeline(PyObject *self, PyObject *args, Py
         descriptor.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
         descriptor.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorSourceAlpha;
     }
-    descriptor.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    descriptor.colorAttachments[0].destinationRGBBlendFactor = additive ? MTLBlendFactorOne : MTLBlendFactorOneMinusSourceAlpha;
     descriptor.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
 
     /* Color write mask */
@@ -2384,6 +2415,32 @@ static PyObject *metal_consume_scrolls(PyObject *, PyObject *args) {
     return result;
 }
 
+static PyObject *metal_consume_pointer_events(PyObject *, PyObject *args) {
+    long long handle;
+    if (!PyArg_ParseTuple(args, "L", &handle)) return nullptr;
+    std::vector<PointerEvent> events;
+    {
+        std::lock_guard<std::mutex> lock(gStateMutex);
+        auto window = gWindows.find(handle);
+        if (window == gWindows.end()) {
+            PyErr_SetString(PyExc_KeyError, "Window handle not found."); return nullptr;
+        }
+        events.swap(window->second.pointerQueue);
+    }
+    PyObject *result = PyList_New(events.size());
+    if (!result) return nullptr;
+    for (size_t i = 0; i < events.size(); ++i) {
+        const auto &event = events[i];
+        PyObject *item = Py_BuildValue("{s:s,s:d,s:d,s:d,s:d,s:d,s:K}",
+            "phase", event.phase == 0 ? "entered" : event.phase == 1 ? "moved" : "exited",
+            "x", event.x, "y", event.y, "prev_x", event.prevX, "prev_y", event.prevY,
+            "timestamp", event.timestamp, "epoch", event.epoch);
+        if (!item) { Py_DECREF(result); return nullptr; }
+        PyList_SET_ITEM(result, i, item);
+    }
+    return result;
+}
+
 static PyObject *metal_consume_touches(PyObject *self, PyObject *args) {
     (void)self;
     long long handle = 0;
@@ -2407,14 +2464,15 @@ static PyObject *metal_consume_touches(PyObject *self, PyObject *args) {
 
     for (size_t i = 0; i < events.size(); i++) {
         const auto &e = events[i];
-        PyObject *dict = Py_BuildValue("{s:i,s:L,s:d,s:d,s:d,s:d,s:d,s:K}",
+        PyObject *dict = Py_BuildValue("{s:i,s:L,s:d,s:d,s:d,s:d,s:d,s:K,s:i,s:s}",
             "phase", e.phase,
             "id", e.touchId,
             "x", e.x,
             "y", e.y,
             "prev_x", e.prevX,
             "prev_y", e.prevY,
-            "timestamp", e.timestamp, "epoch", e.epoch
+            "timestamp", e.timestamp, "epoch", e.epoch, "button", e.button,
+            "source", e.source == 1 ? "mouse" : e.source == 2 ? "pencil" : "touch"
         );
         if (!dict) { Py_DECREF(list); return nullptr; }
         PyList_SET_ITEM(list, i, dict);
@@ -2531,6 +2589,7 @@ static PyObject *metal_resource_counts(PyObject *self, PyObject *args) {
 
 static PyMethodDef metalMethods[] = {
     {"window_state", metal_window_state, METH_VARARGS, "Read window lifecycle state."},
+    {"window_fullscreen", metal_window_fullscreen, METH_VARARGS, "Read or request fullscreen presentation."},
     {"keyboard_events", metal_keyboard_events, METH_VARARGS, "Enable queued keyboard events."},
     {"reset_window_input", metal_reset_window_input, METH_VARARGS, "Cancel pending input for a scene switch."},
     {"discard_pending_draws", metal_discard_pending_draws, METH_VARARGS, "Discard unsubmitted offscreen draws between passes."},
@@ -2556,6 +2615,7 @@ static PyMethodDef metalMethods[] = {
     {"consume_actions", metal_consume_actions, METH_VARARGS, "Consume action button presses for a window."},
     {"consume_touches", metal_consume_touches, METH_VARARGS, "Consume touch events for a window."},
     {"consume_scrolls", metal_consume_scrolls, METH_VARARGS, "Consume scrolling deltas in viewport points."},
+    {"consume_pointer_events", metal_consume_pointer_events, METH_VARARGS, "Consume pointer hover events in viewport points."},
     {"set_title", (PyCFunction)metal_set_title, METH_VARARGS | METH_KEYWORDS, "Set the presentation window title."},
     {"set_action_label", (PyCFunction)metal_set_action_label, METH_VARARGS | METH_KEYWORDS, "Set or hide the auxiliary action button label."},
     {"create_library", (PyCFunction)metal_create_library, METH_VARARGS | METH_KEYWORDS, "Compile a Metal library from complete source."},

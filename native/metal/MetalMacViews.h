@@ -3,6 +3,7 @@
 @interface CocoaPyMetalSurfaceView : NSView
 @property(nonatomic) long long windowHandle;
 @property(nonatomic) NSPoint previousPointer;
+@property(nonatomic, strong) NSTrackingArea *pointerTrackingArea;
 @end
 
 @implementation CocoaPyMetalSurfaceView
@@ -11,6 +12,18 @@
 - (BOOL)isFlipped { return YES; }
 - (BOOL)acceptsFirstResponder { return YES; }
 - (BOOL)acceptsFirstMouse:(NSEvent *)event { return YES; }
+- (void)viewDidMoveToWindow {
+    [super viewDidMoveToWindow];
+    self.window.acceptsMouseMovedEvents = YES;
+}
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (_pointerTrackingArea) [self removeTrackingArea:_pointerTrackingArea];
+    _pointerTrackingArea = [[NSTrackingArea alloc] initWithRect:NSZeroRect
+        options:NSTrackingMouseEnteredAndExited | NSTrackingMouseMoved | NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect
+        owner:self userInfo:nil];
+    [self addTrackingArea:_pointerTrackingArea];
+}
 @end
 
 @interface CocoaPyMetalViewController : NSViewController <NSWindowDelegate>
@@ -20,6 +33,8 @@
 @property(nonatomic) NSInteger actionPressCount, closePressCount;
 @property(nonatomic) long long layoutRevision;
 @property(nonatomic, strong) dispatch_semaphore_t vsyncSemaphore;
+@property(nonatomic) BOOL fullscreenTarget, fullscreenTransition;
+- (void)requestFullscreen:(BOOL)fullscreen;
 - (instancetype)initWithTitle:(NSString *)title;
 - (void)consumeActionCount:(int *)action closeCount:(int *)close;
 - (void)vsyncFired;
@@ -49,6 +64,37 @@
 }
 - (void)windowDidChangeBackingProperties:(NSNotification *)notification { _layoutRevision += 1; }
 - (BOOL)windowShouldClose:(NSWindow *)sender { _closePressCount += 1; return NO; }
+- (void)requestFullscreen:(BOOL)fullscreen {
+    _fullscreenTarget = fullscreen;
+    NSWindow *window = self.view.window;
+    if (!window || window.delegate != self || _fullscreenTransition || ((window.styleMask & NSWindowStyleMaskFullScreen) != 0) == fullscreen) return;
+    _fullscreenTransition = YES;
+    [window toggleFullScreen:nil];
+}
+- (void)windowWillEnterFullScreen:(NSNotification *)notification {
+    if (!_fullscreenTransition) _fullscreenTarget = YES;
+    _fullscreenTransition = YES;
+}
+- (void)windowWillExitFullScreen:(NSNotification *)notification {
+    if (!_fullscreenTransition) _fullscreenTarget = NO;
+    _fullscreenTransition = YES;
+}
+- (void)windowDidEnterFullScreen:(NSNotification *)notification {
+    _fullscreenTransition = NO;
+    dispatch_async(dispatch_get_main_queue(), ^{ [self requestFullscreen:self.fullscreenTarget]; });
+}
+- (void)windowDidExitFullScreen:(NSNotification *)notification {
+    _fullscreenTransition = NO;
+    dispatch_async(dispatch_get_main_queue(), ^{ [self requestFullscreen:self.fullscreenTarget]; });
+}
+- (void)windowDidFailToEnterFullScreen:(NSWindow *)window {
+    _fullscreenTransition = NO;
+    _fullscreenTarget = (window.styleMask & NSWindowStyleMaskFullScreen) != 0;
+}
+- (void)windowDidFailToExitFullScreen:(NSWindow *)window {
+    _fullscreenTransition = NO;
+    _fullscreenTarget = (window.styleMask & NSWindowStyleMaskFullScreen) != 0;
+}
 - (void)actionTapped:(id)sender { _actionPressCount += 1; }
 - (void)consumeActionCount:(int *)action closeCount:(int *)close {
     if (action) *action = (int)_actionPressCount;

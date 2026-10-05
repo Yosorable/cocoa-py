@@ -43,6 +43,11 @@ class PointerRouter:
             target = scene.hit_test(*touch.position)
             record = _Pointer(touch, touch, target)
             self.active[touch.id] = record
+            if touch.button != 0:
+                record.target = scene
+                record.scene_owned = True
+                scene.touch_began(touch)
+                return
             current = target
             while current is not None and current is not scene:
                 if getattr(current, "_is_scroll_view", False) and current.enabled:
@@ -194,6 +199,7 @@ class PointerRouter:
                 if max(map(abs, remaining)) < .001:
                     break
             node = node.parent
+        return remaining
 
     def cancel_subtree(self, node):
         if node is self.scene:

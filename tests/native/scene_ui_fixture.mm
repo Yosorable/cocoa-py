@@ -15,6 +15,16 @@
 - (NSTimeInterval)timestamp { return NSProcessInfo.processInfo.systemUptime; }
 @end
 
+@interface CocoaPyFixturePointerEvent : NSEvent
+@property(nonatomic) NSPoint fixtureLocation;
+@property(nonatomic) NSInteger fixtureButton;
+@end
+@implementation CocoaPyFixturePointerEvent
+- (NSPoint)locationInWindow { return self.fixtureLocation; }
+- (NSInteger)buttonNumber { return self.fixtureButton; }
+- (NSTimeInterval)timestamp { return NSProcessInfo.processInfo.systemUptime; }
+@end
+
 static NSView *findSurface(NSView *view, long long handle) {
     if ([NSStringFromClass(view.class) isEqual:@"CocoaPyMetalSurfaceView"] &&
         [[view valueForKey:@"windowHandle"] longLongValue] == handle) return view;
@@ -23,6 +33,54 @@ static NSView *findSurface(NSView *view, long long handle) {
         if (surface) return surface;
     }
     return nil;
+}
+
+static PyObject *pointer(PyObject *, PyObject *args) {
+    long long handle;
+    const char *phase;
+    double x, y;
+    int button = 0;
+    if (!PyArg_ParseTuple(args, "Lsdd|i", &handle, &phase, &x, &y, &button)) return nullptr;
+    @autoreleasepool {
+        __block NSString *error = nil;
+        dispatch_block_t work = ^{
+            @try {
+                NSView *surface = nil;
+                for (NSWindow *window in NSApp.windows) {
+                    surface = findSurface(window.contentView, handle);
+                    if (surface) break;
+                }
+                if (!surface) { error = @"Scene surface not found"; return; }
+                CocoaPyFixturePointerEvent *event = [CocoaPyFixturePointerEvent new];
+                event.fixtureLocation = [surface convertPoint:NSMakePoint(x, y) toView:nil];
+                event.fixtureButton = button;
+                if (!strcmp(phase, "entered")) [surface mouseEntered:event];
+                else if (!strcmp(phase, "moved")) [surface mouseMoved:event];
+                else if (!strcmp(phase, "exited")) [surface mouseExited:event];
+                else if (!strcmp(phase, "down")) {
+                    if (button == 0) [surface mouseDown:event];
+                    else if (button == 1) [surface rightMouseDown:event];
+                    else [surface otherMouseDown:event];
+                } else if (!strcmp(phase, "dragged")) {
+                    if (button == 0) [surface mouseDragged:event];
+                    else if (button == 1) [surface rightMouseDragged:event];
+                    else [surface otherMouseDragged:event];
+                } else if (!strcmp(phase, "up")) {
+                    if (button == 0) [surface mouseUp:event];
+                    else if (button == 1) [surface rightMouseUp:event];
+                    else [surface otherMouseUp:event];
+                } else error = @"Unknown pointer event";
+            } @catch (NSException *exception) { error = exception.reason; }
+        };
+        if (NSThread.isMainThread) work();
+        else {
+            Py_BEGIN_ALLOW_THREADS
+            dispatch_sync(dispatch_get_main_queue(), work);
+            Py_END_ALLOW_THREADS
+        }
+        if (error) { PyErr_SetString(PyExc_RuntimeError, error.UTF8String); return nullptr; }
+    }
+    Py_RETURN_NONE;
 }
 
 static PyObject *scroll(PyObject *, PyObject *args) {
@@ -130,6 +188,7 @@ static PyObject *lifecycle(PyObject *, PyObject *args) {
 }
 
 static PyMethodDef methods[] = {
+    {"pointer", pointer, METH_VARARGS, nullptr},
     {"scroll", scroll, METH_VARARGS, nullptr},
     {"keyboard", keyboard, METH_VARARGS, nullptr},
     {"lifecycle", lifecycle, METH_VARARGS, nullptr}, {nullptr}};

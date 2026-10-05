@@ -116,13 +116,18 @@ and Escape ends editing.
 
 Change scene controls on the Python scene-loop thread. Pass callbacks at
 construction or assign them later. Each receives the control:
-`on_change`, `on_selection_change`, `on_submit`, `on_focus`, `on_blur`.
+`on_change`, `on_selection_change`, `on_submit`, `on_focus`, `on_blur`, `on_cancel`.
 They run on the Python scene-loop thread at frame boundaries, never inside a
 native editor delegate. Native events use a bounded queue of 256 entries per
 control. Adjacent changes can coalesce and the oldest entries are dropped on
 overflow; callbacks are notifications of current state, not an edit-history log.
 Programmatic text and selection assignments do not emit change callbacks.
 Removing or closing a control discards its queued callbacks.
+
+`on_cancel` runs after `on_blur` when Escape ends editing, on macOS or an iOS
+hardware keyboard. The text is retained. Escape during input-method composition
+belongs to the input method and does not cancel the control. Programmatic blur,
+keyboard dismissal, and losing window focus do not emit `on_cancel`.
 
 `Scene.focused_input` returns the current control or `None`.
 `Scene.focus_next_input(current=None, reverse=False)` cycles through visible,
@@ -206,7 +211,7 @@ caret_rect=(0, 0, 1, 20), on_next=None, on_previous=None, **editing_options)`.
 Editing options are `enabled`, `read_only`, `max_length`, `keyboard_type`,
 `return_key`, `autocapitalization`, `autocorrection`, `spell_check`,
 `content_type`, `keyboard_appearance`, `select_all_on_focus`, `submit_behavior`,
-and the five change/focus/submit callbacks described above. Appearance and Node
+and the change/focus/submit/cancel callbacks described above. Appearance and Node
 constructor options are not accepted. Multiline sessions default to newline
 insertion, while single-line sessions default to submitting and ending input.
 

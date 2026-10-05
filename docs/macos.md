@@ -68,3 +68,16 @@ its own app after Python times out.
 No module collects analytics or forwards user data to a cocoa-py server.
 Geocoding uses Apple's service; sharing sends only the items and destination the
 caller and user select.
+
+## Fullscreen presentation (current source)
+
+The current source also exposes `Scene.fullscreen` and `gpu.Window.fullscreen`.
+Reading the property returns the actual macOS fullscreen state. Assigning a bool
+requests an asynchronous AppKit transition; a newer assignment during the
+transition replaces the pending target. Native fullscreen controls remain usable,
+and normal scene resize callbacks reflect the resulting viewport. If AppKit
+rejects a transition, the getter continues to reflect the actual state.
+
+UIKit presentation belongs to the host: the property returns `True` and assigning
+either value leaves that presentation unchanged. This does not request an iPad
+multitasking mode or change host window geometry.

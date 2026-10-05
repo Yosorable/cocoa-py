@@ -77,6 +77,28 @@ class Touch:
     prev_position: tuple[float, float]
     phase: TouchPhase
     timestamp: float = 0.0
+    button: int = 0
+    source: str = "touch"
+
+
+@dataclass(frozen=True, slots=True)
+class PointerEvent:
+    """Unpressed pointer motion in viewport points, independent of touches."""
+    position: tuple[float, float]
+    prev_position: tuple[float, float]
+    phase: str = "moved"
+    timestamp: float = 0.0
+    cancelled: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ScrollEvent:
+    """Scrolling left over after ScrollView ancestors consume their deltas."""
+    position: tuple[float, float]
+    delta: tuple[float, float]
+    precise: bool = False
+    momentum: bool = False
+    timestamp: float = 0.0
 
 # Index → TouchPhase, matching the int phase code from the native layer.
 # TouchPhase is a StrEnum so ``phase == "began"`` continues to work.

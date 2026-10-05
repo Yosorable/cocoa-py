@@ -2,6 +2,11 @@
 
 @interface CocoaPyMetalSurfaceView : UIView
 @property (nonatomic, assign) long long windowHandle;
+@property (nonatomic, assign) CGPoint previousPointer;
+@end
+
+@interface CocoaPyMetalSurfaceView (Touch)
+- (void)cocoaHover:(UIHoverGestureRecognizer *)recognizer;
 @end
 
 @implementation CocoaPyMetalSurfaceView
@@ -68,6 +73,9 @@
     _surfaceView = [[CocoaPyMetalSurfaceView alloc] initWithFrame:CGRectZero];
     _surfaceView.translatesAutoresizingMaskIntoConstraints = NO;
     _surfaceView.multipleTouchEnabled = YES;
+    UIHoverGestureRecognizer *hover = [[UIHoverGestureRecognizer alloc] initWithTarget:_surfaceView action:@selector(cocoaHover:)];
+    hover.cancelsTouchesInView = NO;
+    [_surfaceView addGestureRecognizer:hover];
     [self.view addSubview:_surfaceView];
 
     _titleLabel = nil;

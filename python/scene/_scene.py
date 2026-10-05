@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 
 from _cocoa import _scene_accel
 from _cocoa import _metal
 from . import gesture as gesture_module
 from ._common import (
-    _IDENTITY, CollisionInfo, Orientation, Touch, _PHASES, _apply, _color,
+    _IDENTITY, CollisionInfo, Orientation, PointerEvent, ScrollEvent, Touch, _PHASES, _apply, _color,
     _invert,
 )
 from ._collision import _collider_to_tuple, _SpatialHash
@@ -91,6 +92,30 @@ class Scene(Node):
         """A touch was cancelled. Defaults to the legacy touch_ended callback."""
         self.touch_ended(touch)
 
+    def pointer_moved(self, event: PointerEvent) -> None:
+        """A mouse, trackpad, or supported Pencil pointer entered or moved."""
+        pass
+
+    def pointer_exited(self, event: PointerEvent) -> None:
+        """The pointer exited, or cancelled=True when input ownership was lost."""
+        pass
+
+    def scroll(self, event: ScrollEvent) -> None:
+        """Handle wheel/trackpad deltas not consumed by a ScrollView."""
+        pass
+
+    @property
+    def pointer_position(self) -> tuple[float, float] | None:
+        """The latest hovered viewport position, or None outside the scene."""
+        event = getattr(self, "_last_pointer_event", None)
+        return event.position if event is not None else None
+
+    def _cancel_hover(self):
+        event = getattr(self, "_last_pointer_event", None)
+        self._last_pointer_event = None
+        if event is not None:
+            self.pointer_exited(replace(event, phase="exited", cancelled=True, timestamp=time.monotonic()))
+
     def keyboard_changed(self, frame):
         """The software keyboard's screen-space rectangle changed (or is None)."""
         pass
@@ -114,6 +139,15 @@ class Scene(Node):
     @property
     def window_state(self):
         return self._platform_input.state
+
+    @property
+    def fullscreen(self):
+        """Current window fullscreen state; see gpu.Window.fullscreen."""
+        return self._window.fullscreen
+
+    @fullscreen.setter
+    def fullscreen(self, value):
+        self._window.fullscreen = value
 
     @property
     def keys_down(self):
@@ -239,6 +273,7 @@ class Scene(Node):
         self._owns_renderer = renderer is None
         from ._pointer import PointerRouter
         self._pointer_router = PointerRouter(self)
+        self._last_pointer_event = None
         from ._focus import FocusManager
         self._focus_manager = FocusManager(self)
         self.background = normalize_color(background)
@@ -527,6 +562,9 @@ class Scene(Node):
         consume_scrolls = getattr(self._window, "consume_scrolls", None)
         if consume_scrolls is not None:
             events.extend((event["timestamp"], "scroll", event) for event in consume_scrolls())
+        consume_pointer = getattr(self._window, "consume_pointer_events", None)
+        if consume_pointer is not None:
+            events.extend((event["timestamp"], "pointer", event) for event in consume_pointer())
         events.extend((event["timestamp"], "key", event) for event in platform.pending_keys)
         platform.pending_keys = []
         events.sort(key=lambda item: item[0])
@@ -537,14 +575,25 @@ class Scene(Node):
                 platform.feed_key(e)
                 continue
             if kind == "scroll":
-                self._pointer_router.scroll(e)
+                delta = self._pointer_router.scroll(e)
+                if delta and max(map(abs, delta)) >= .001:
+                    self.scroll(ScrollEvent((e["x"], e["y"]), delta, e.get("precise", False), e.get("momentum", False), e.get("timestamp", 0)))
+                continue
+            if kind == "pointer":
+                event = PointerEvent((e["x"], e["y"]), (e["prev_x"], e["prev_y"]), e["phase"], e.get("timestamp", 0))
+                if event.phase == "exited":
+                    self._last_pointer_event = None
+                    self.pointer_exited(event)
+                else:
+                    self._last_pointer_event = event
+                    self.pointer_moved(event)
                 continue
             phase = _PHASES[e["phase"]] if e["phase"] < 4 else _PHASES[3]
             # Touches stay in screen space — _world_transform includes camera,
             # so hit_test and contains_point work correctly in screen space.
             # Use camera.screen_to_world() for world coordinates in game logic.
             t = Touch(e["id"], (e["x"], e["y"]), (e["prev_x"], e["prev_y"]), phase,
-                      e.get("timestamp", 0.0))
+                      e.get("timestamp", 0.0), button=e.get("button", 0), source=e.get("source", "touch"))
             self._pointer_router.feed(t)
         platform.repeat_keys()
 
