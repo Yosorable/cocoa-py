@@ -1,7 +1,6 @@
 # Pointer input
 
-This page describes additions in the current source. They are not included in
-the published `0.1.0a7` wheels.
+This guide covers the pointer input APIs added in `0.1.0a8`.
 
 Scenes receive hover independently of contact and dragging. AppKit supplies
 mouse movement; UIKit uses `UIHoverGestureRecognizer` for supported pointing

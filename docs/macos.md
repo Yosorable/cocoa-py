@@ -69,9 +69,9 @@ No module collects analytics or forwards user data to a cocoa-py server.
 Geocoding uses Apple's service; sharing sends only the items and destination the
 caller and user select.
 
-## Fullscreen presentation (current source)
+## Fullscreen presentation
 
-The current source also exposes `Scene.fullscreen` and `gpu.Window.fullscreen`.
+Version 0.1.0a8 adds `Scene.fullscreen` and `gpu.Window.fullscreen`.
 Reading the property returns the actual macOS fullscreen state. Assigning a bool
 requests an asynchronous AppKit transition; a newer assignment during the
 transition replaces the pending target. Native fullscreen controls remain usable,
