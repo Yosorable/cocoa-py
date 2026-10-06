@@ -15,6 +15,8 @@
 #include <array>
 #include <ctype.h>
 #include <math.h>
+#include <new>
+#include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -54,6 +56,7 @@ enum {
     NTYPE_NINESLICE   = 9,
     NTYPE_PATH        = 10,
     NTYPE_PARTICLE    = 11,
+    NTYPE_SPRITE_BATCH = 12,
     NTYPE_UNKNOWN = -1,
 };
 
@@ -99,6 +102,7 @@ static PyObject *s__collider, *s_contains_point;
 /* Lazy-init type objects */
 static PyObject *SceneType, *GroupType, *LayerType;
 static PyObject *CircleType, *RectType, *LineType, *LabelType, *ImageType, *SpriteType, *ShaderNodeType;
+static PyObject *SpriteBatchType;
 static PyObject *NineSliceType, *PathType, *PolygonType, *ParticleEmitterType;
 static int types_ready = 0;
 
@@ -162,6 +166,7 @@ static int ensure_types(void) {
     LOAD(ShaderNodeType, "ShaderNode"); LOAD(NineSliceType, "NineSlice");
     LOAD(PathType, "Path"); LOAD(PolygonType, "Polygon");
     LOAD(ParticleEmitterType, "ParticleEmitter");
+    LOAD(SpriteBatchType, "SpriteBatch");
     #undef LOAD
     Py_DECREF(mod);
     types_ready = 1;
@@ -180,6 +185,7 @@ typedef struct {
     uint8_t qb[64];        /* 4 × float4 × 4 bytes */
     PyObject *texture;     /* borrowed ref for current frame */
     int mesh_batch_idx;    /* index into mesh_batches for KIND_MESH, -1 otherwise */
+    int batch_index;       /* compact sprite index, only for SpriteBatch */
     int particle_idx;      /* index into particle_emitters for KIND_PARTICLE, -1 otherwise */
     PyObject *clips;       /* borrowed from CollectState.clip_contexts */
     int render_layer;
@@ -190,6 +196,7 @@ typedef struct {
     double base[13];       /* x, y, rotation, sx, sy, opacity, z, affine[6] */
     double shape[12];      /* type-specific params */
     int shape_len;
+    unsigned long long batch_revision;
     PyObject *colors[3];   /* strong refs to color objects */
     int color_count;
     double parent_tf[6];
@@ -270,8 +277,11 @@ typedef struct {
     int particle_capacity;
     PyObject *clip_contexts;
     PyObject *sort_contexts;
+    PyObject *batch_collections; /* owned (node, cache, storage) triples until frame packing ends */
     double screen_transform[6];
 } CollectState;
+
+static void batch_end_collections(PyObject *collections);
 
 static inline unsigned long long fingerprint_mix(unsigned long long h, unsigned long long v) {
     h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
@@ -978,6 +988,7 @@ static void state_init(CollectState *st, double screen_scale, PyObject *renderer
     st->particle_count = 0;
     st->clip_contexts = PyList_New(0);
     st->sort_contexts = PyList_New(0);
+    st->batch_collections = PyList_New(0);
 }
 
 static CCmd *state_append(CollectState *st) {
@@ -1006,6 +1017,9 @@ static void state_destroy(CollectState *st) {
     st->mesh_batches = NULL;
     free(st->particle_emitters);
     st->particle_emitters = NULL;
+    batch_end_collections(st->batch_collections);
+    Py_XDECREF(st->batch_collections);
+    st->batch_collections = NULL;
 }
 
 static bool state_take_render_error(CollectState *st) {
@@ -1146,42 +1160,106 @@ static void collect_layer_interactions(PyObject *node, const double world[6], do
 }
 
 /* ─────────────────────────────────────────────────────────────────────── */
-/* CNodeCache (stored as PyCapsule on node._c_cache)                       */
+/* CNodeCache ownership on node._c_cache                                  */
 /* ─────────────────────────────────────────────────────────────────────── */
 
 static const char *CAPSULE_NAME = "_scene_accel.cache";
 
-static void cache_destructor(PyObject *capsule) {
-    CNodeCache *c = (CNodeCache *)PyCapsule_GetPointer(capsule, CAPSULE_NAME);
-    if (c) {
-        for (int i = 0; i < c->color_count; i++) Py_XDECREF(c->colors[i]);
-        for (int i = 0; i < c->cmd_count; i++) Py_XDECREF(c->cmds[i].texture);
-        if (c->dyn_cmds) {
-            for (int i = 0; i < c->dyn_count; i++) Py_XDECREF(c->dyn_cmds[i].texture);
-            free(c->dyn_cmds);
-        }
-        Py_XDECREF(c->snap_cache);
-        Py_XDECREF(c->cached_mesh_list);
-        free(c);
+static void cache_release(CNodeCache *c) {
+    for (int i = 0; i < c->color_count; i++) Py_XDECREF(c->colors[i]);
+    for (int i = 0; i < c->cmd_count; i++) Py_XDECREF(c->cmds[i].texture);
+    if (c->dyn_cmds) {
+        for (int i = 0; i < c->dyn_count; i++) Py_XDECREF(c->dyn_cmds[i].texture);
+        free(c->dyn_cmds);
     }
+    Py_XDECREF(c->snap_cache);
+    Py_XDECREF(c->cached_mesh_list);
 }
 
-static CNodeCache *get_cache(PyObject *node) {
+static void cache_destructor(PyObject *capsule) {
+    CNodeCache *c = (CNodeCache *)PyCapsule_GetPointer(capsule, CAPSULE_NAME);
+    if (c) { cache_release(c); free(c); }
+}
+
+/* Batch caches retain storage and textures that may refer back to the node.
+   Their ownership must be visible to GC just like the batch records. */
+struct BatchCacheObject {
+    PyObject_HEAD
+    CNodeCache cache;
+};
+
+static PyTypeObject BatchCacheType = { PyVarObject_HEAD_INIT(NULL, 0) };
+
+static int batch_cache_traverse(BatchCacheObject *self, visitproc visit, void *arg) {
+    auto *c = &self->cache;
+    for (int i = 0; i < c->color_count; ++i) Py_VISIT(c->colors[i]);
+    for (int i = 0; i < c->cmd_count; ++i) Py_VISIT(c->cmds[i].texture);
+    for (int i = 0; i < c->dyn_count; ++i) Py_VISIT(c->dyn_cmds[i].texture);
+    Py_VISIT(c->snap_cache);
+    Py_VISIT(c->cached_mesh_list);
+    return 0;
+}
+
+static int batch_cache_clear(BatchCacheObject *self) {
+    // Detach every reference before decrefs can run Python finalizers.
+    CNodeCache detached = self->cache;
+    memset(&self->cache, 0, sizeof(self->cache));
+    self->cache.type_id = NTYPE_UNKNOWN;
+    cache_release(&detached);
+    return 0;
+}
+
+static void batch_cache_dealloc(BatchCacheObject *self) {
+    PyObject_GC_UnTrack(self);
+    batch_cache_clear(self);
+    PyObject_GC_Del(self);
+}
+
+struct CacheReference {
+    PyObject *owner = nullptr;
+    ~CacheReference() { Py_XDECREF(owner); }
+};
+
+static CNodeCache *get_cache(PyObject *node, PyObject **owner = nullptr) {
     PyObject *cap = PyObject_GetAttr(node, s__c_cache);
-    if (cap && PyCapsule_IsValid(cap, CAPSULE_NAME)) {
+    bool is_batch = SpriteBatchType && PyObject_TypeCheck(node, (PyTypeObject *)SpriteBatchType);
+    if (cap && Py_IS_TYPE(cap, &BatchCacheType)) {
+        CNodeCache *c = &((BatchCacheObject *)cap)->cache;
+        if (owner) *owner = cap;
+        else Py_DECREF(cap);
+        return c;
+    }
+    if (cap && !is_batch && PyCapsule_IsValid(cap, CAPSULE_NAME)) {
         CNodeCache *c = (CNodeCache *)PyCapsule_GetPointer(cap, CAPSULE_NAME);
-        Py_DECREF(cap);
+        if (owner) *owner = cap;
+        else Py_DECREF(cap);
         return c;
     }
     Py_XDECREF(cap);
     PyErr_Clear();
 
-    CNodeCache *c = (CNodeCache *)calloc(1, sizeof(CNodeCache));
+    CNodeCache *c;
+    PyObject *new_cap;
+    if (is_batch) {
+        auto *object = PyObject_GC_New(BatchCacheObject, &BatchCacheType);
+        if (!object) return NULL;
+        memset(&object->cache, 0, sizeof(object->cache));
+        c = &object->cache;
+        new_cap = (PyObject *)object;
+        PyObject_GC_Track(object);
+    } else {
+        c = (CNodeCache *)calloc(1, sizeof(CNodeCache));
+        if (!c) { PyErr_NoMemory(); return NULL; }
+        new_cap = PyCapsule_New(c, CAPSULE_NAME, cache_destructor);
+        if (!new_cap) { free(c); return NULL; }
+    }
     c->type_id = NTYPE_UNKNOWN;
-    PyObject *new_cap = PyCapsule_New(c, CAPSULE_NAME, cache_destructor);
-    if (!new_cap) { free(c); return NULL; }
-    PyObject_SetAttr(node, s__c_cache, new_cap);
-    Py_DECREF(new_cap);
+    if (PyObject_SetAttr(node, s__c_cache, new_cap) < 0) {
+        Py_DECREF(new_cap);
+        return NULL;
+    }
+    if (owner) *owner = new_cap;
+    else Py_DECREF(new_cap);
     return c;
 }
 
@@ -1197,6 +1275,7 @@ static int identify_type(PyObject *node) {
     if (tp == LabelType)  return NTYPE_LABEL;
     if (tp == ImageType)  return NTYPE_IMAGE;
     if (tp == SpriteType) return NTYPE_SPRITE;
+    if (tp == SpriteBatchType) return NTYPE_SPRITE_BATCH;
     if (tp == ShaderNodeType) return NTYPE_SHADERNODE;
     if (tp == NineSliceType) return NTYPE_NINESLICE;
     if (tp == ParticleEmitterType) return NTYPE_PARTICLE;
@@ -1204,6 +1283,8 @@ static int identify_type(PyObject *node) {
     if (tp == LayerType)  return NTYPE_LAYER;
     if (tp == GroupType || tp == SceneType) return NTYPE_GROUP;
     /* Check subclass of known container types */
+    if (PyObject_IsInstance(node, SpriteBatchType))
+        return NTYPE_SPRITE_BATCH;
     if (PyObject_IsInstance(node, GroupType) || PyObject_IsInstance(node, SceneType))
         return NTYPE_GROUP;
     if (PyObject_IsInstance(node, PathType))
@@ -1712,6 +1793,8 @@ static void emit_sprite(PyObject *node, CNodeCache *cache, CollectState *st,
 /* ─────────────────────────────────────────────────────────────────────── */
 /* NineSlice — 9-patch stretchable texture                                 */
 /* ─────────────────────────────────────────────────────────────────────── */
+
+#include "SpriteBatch.h"
 
 static void emit_nineslice(PyObject *node, CNodeCache *cache, CollectState *st,
                             const double world[6], double op) {
@@ -2272,12 +2355,18 @@ static void collect_recursive(PyObject *node, const double ptf[6], double pop,
     st->fingerprint = fingerprint_mix(st->fingerprint, (unsigned long long)(uintptr_t)node);
 
     /* Get/create cache */
-    CNodeCache *cache = get_cache(node);
+    CacheReference cache_reference;
+    CNodeCache *cache = get_cache(node, &cache_reference.owner);
     if (!cache) { PyErr_Clear(); return; }
 
     /* Determine type (cached after first identification) */
     if (!cache->valid || cache->type_id == NTYPE_UNKNOWN) {
         cache->type_id = identify_type(node);
+    }
+    if (cache->type_id == NTYPE_SPRITE_BATCH &&
+        batch_begin_collection(node, cache_reference.owner, st) < 0) {
+        state_take_render_error(st);
+        return;
     }
     st->fingerprint = fingerprint_mix(st->fingerprint, (unsigned long long)(cache->type_id + 17));
     if (cache->type_id == NTYPE_PARTICLE || cache->type_id == NTYPE_SHADERNODE) {
@@ -2526,6 +2615,14 @@ static void collect_recursive(PyObject *node, const double ptf[6], double pop,
         }
     }
 
+    if (cache->type_id == NTYPE_SPRITE_BATCH) {
+        PyObject *capsule = PyObject_GetAttrString(node, "_batch_data");
+        auto *data = capsule ? batch_data(capsule) : nullptr;
+        if (!data) { Py_XDECREF(capsule); state_take_render_error(st); return; }
+        if (capsule != cache->snap_cache || data->revision != cache->batch_revision) hit = 0;
+        Py_DECREF(capsule);
+    }
+
     if (!hit) {
         st->any_miss = 1;
     }
@@ -2613,6 +2710,9 @@ static void collect_recursive(PyObject *node, const double ptf[6], double pop,
                 break;
             case NTYPE_SPRITE:
                 emit_sprite(node, cache, st, world, wop);
+                break;
+            case NTYPE_SPRITE_BATCH:
+                if (emit_sprite_batch(node, cache, st, world, wop) < 0) state_take_render_error(st);
                 break;
             case NTYPE_SHADERNODE:
                 emit_shadernode(node, cache, st, world, wop);
@@ -2887,6 +2987,13 @@ static void collect_recursive(PyObject *node, const double ptf[6], double pop,
         st->cmds[i].sort_scope = sort_scope;
     }
 
+    if (cache->type_id == NTYPE_SPRITE_BATCH &&
+        batch_clip_commands(cache, st, command_start, clips) < 0) {
+        cache->valid = 0;
+        state_take_render_error(st);
+        return;
+    }
+
     /* Collect interactive nodes (for hit testing) — use cached bounds */
     if (node != st->root && cache->type_id != NTYPE_GROUP) {
         int is_interactive = read_bool(node, s_interactive);
@@ -2998,7 +3105,8 @@ static PyObject *accel_collect(PyObject *self, PyObject *args) {
     } else if (PyErr_ExceptionMatches(PyExc_AttributeError)) PyErr_Clear();
     else state_take_render_error(&st);
     PyObject *empty_clips = PyTuple_New(0);
-    if (st.clip_contexts && st.sort_contexts && empty_clips && PyList_Append(st.clip_contexts, empty_clips) == 0)
+    if (st.clip_contexts && st.sort_contexts && st.batch_collections && empty_clips &&
+        PyList_Append(st.clip_contexts, empty_clips) == 0)
         collect_recursive(root, tf, opacity, &st, empty_clips, 0, empty_clips);
     else state_take_render_error(&st);
     Py_XDECREF(empty_clips);
@@ -4614,6 +4722,18 @@ static PyObject *accel_ui_nodes(PyObject *, PyObject *args) {
 /* ─────────────────────────────────────────────────────────────────────── */
 
 static PyMethodDef methods[] = {
+    {"_batch_new", batch_new, METH_NOARGS, "Create compact sprite storage."},
+    {"_batch_append", batch_append, METH_O, "Append an empty sprite record."},
+    {"_batch_copy", batch_copy, METH_VARARGS, "Append a validated sprite record."},
+    {"_batch_get", batch_get, METH_VARARGS, "Read a sprite field."},
+    {"_batch_set", batch_set, METH_VARARGS, "Update a sprite field."},
+    {"_batch_revision", batch_revision, METH_O, "Return the batch content revision."},
+    {"_batch_check_writable", batch_check_writable, METH_O, "Reject edits during batch collection."},
+    {"_batch_begin_collect", batch_begin_collect, METH_O, "Protect batch storage during Python collection."},
+    {"_batch_end_collect", batch_end_collect, METH_O, "Release Python collection protection."},
+    {"_batch_order", batch_order, METH_O, "Return sprite indices in hierarchy order."},
+    {"_batch_transforms", batch_transforms, METH_VARARGS, "Atomically update selected sprite transforms."},
+    {"_batch_update", batch_update, METH_VARARGS, "Atomically update selected sprite geometry and appearance."},
     {"_configure_ticks", configure_ticks, METH_VARARGS, "Register the built-in Python tick handlers."},
     {"tick", accel_tick, METH_VARARGS, "Update a node subtree, preserving Python callbacks and child snapshots."},
     {"ui_nodes", accel_ui_nodes, METH_VARARGS, "Collect layout, event, input and focus nodes in postorder."},
@@ -4651,6 +4771,13 @@ static struct PyModuleDef module_def = {
 
 PyMODINIT_FUNC PyInit__scene_accel(void) {
     if (intern_strings() < 0) return NULL;
+    BatchCacheType.tp_name = "_cocoa._scene_accel._BatchCache";
+    BatchCacheType.tp_basicsize = sizeof(BatchCacheObject);
+    BatchCacheType.tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC;
+    BatchCacheType.tp_traverse = (traverseproc)batch_cache_traverse;
+    BatchCacheType.tp_clear = (inquiry)batch_cache_clear;
+    BatchCacheType.tp_dealloc = (destructor)batch_cache_dealloc;
+    if (PyType_Ready(&BatchCacheType) < 0 || batch_init_type() < 0) return NULL;
     return PyModule_Create(&module_def);
 }
 

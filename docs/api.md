@@ -68,6 +68,62 @@ changing a child's transform.
 Layer caches align their raster bounds to local pixels, so equivalent transform
 chains do not shift the sampling grid when their enclosing bounds differ.
 
+`SpriteBatch` stores many explicitly updated images in one scene node. Append
+a `Texture` or `SpriteFrame` with `batch.add_sprite(source, ...)`, which returns
+a `BatchSprite` handle with a stable `index`. Handles expose `frame`,
+`sprite_size`, `anchor`, `affine_transform`, `opacity`, `visible`, `z`, `tint`,
+`blend`, `flip_x`, `flip_y`, and `clip`. Replacing `frame` changes the texture and
+UVs; it does not resize the record. Textures are retained but remain owned by
+the caller.
+
+```python
+batch = scene.SpriteBatch()
+scene_root.add(batch)
+left = batch.add_sprite(frame, anchor=(0, 0))
+right = batch.add_sprite(frame, anchor=(0, 0))
+batch.set_transforms((left.index, right.index),
+                     ((1, 0, .2, 1, 20, 30), (1, 0, -.2, 1, 80, 30)))
+```
+
+`set_transforms(indices, matrices, transform=None)` validates and copies the
+entire update before changing any record. The optional keyword `transform`
+is prepended to every matrix. `set_poses(indices, poses)` accepts
+`(x, y, rotation, scale_x, scale_y)` rows, with rotation in radians. Inputs and
+resulting coefficients must be finite. Repeated indices use the final value.
+These APIs accept ordinary sequences and do not require NumPy.
+
+`update_sprites(indices, *, transforms=None, poses=None, sizes=None, tints=None,
+opacities=None, depths=None, visible=None, transform=None)` combines geometry
+and appearance edits in one atomic call. Each supplied column has one value
+per index: matrix or pose rows use the formats above, sizes have two components,
+tints have four, and the remaining columns contain scalar values. Supply either
+transforms or poses; the shared transform requires one of them. Omitted columns
+retain their current values. The whole update is validated before any supplied
+field changes, and repeated indices use their final values. Sequences and
+numeric conversions may execute Python; inputs are snapshotted before reading
+their elements so callbacks cannot invalidate the sequence storage being read.
+
+An optional `parent` passed to `add_sprite` must be an earlier handle in the
+same batch. Its transform, opacity, visibility and clipping apply to the child;
+depth and tint remain independent. Equal depths follow each parent and its
+descendants before the next sibling. A record's `ClipRect` uses **batch local
+coordinates**, before the record's transform, and intersects inherited clips.
+Ordinary Node transforms, scene stacking contexts and screen layers also apply.
+`clear()` detaches all records; existing handles no longer affect the batch.
+Invalidate an enclosing `Layer` after changes to its cached content.
+
+Rendering callbacks must not edit a batch being collected or recursively
+collect that same batch; those operations raise `RuntimeError`. Texture
+finalizers follow the same rule. Batch records and their native drawing caches
+participate in Python garbage collection, including cycles through custom
+textures or clips. Changes in a custom clip's rendered state invalidate a
+stationary frame.
+
+Batch records have no actions, input callbacks or scene children. Use ordinary
+nodes for those features. Batching reduces CPU traversal and property updates;
+texture, blend and clip changes still follow the renderer's existing draw
+batching rules, so a SpriteBatch does not guarantee a single GPU draw call.
+
 `gpu.Frame.draw_many(primitive, draws, texture_index=0)` submits an ordered
 sequence of `(pipeline, texture, vertex_start, vertex_count)` entries using the
 currently bound vertex and fragment buffers. A `None` pipeline or texture keeps

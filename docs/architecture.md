@@ -46,6 +46,22 @@ traversal. It preserves postorder, each parent's child snapshot and Python
 descriptor access, including errors and mutations during inspection. Registry
 lists are replaced only after a successful scan.
 
+SpriteBatch stores image records in compact native storage, with Python
+handles for individual edits and atomic bulk updates for affine matrices,
+component poses and appearance columns. Bulk edits validate all requested
+columns before committing; mutable input sequences are snapshotted before
+element conversions can run Python callbacks. The collector emits quads without traversing
+one Scene node per image. Parent records preserve inherited geometry,
+visibility, opacity and clipping; ordinary scene depth sorting still applies.
+Animation selection, simulation and application state remain outside this
+storage layer. The Python collection path supports cached Layers and capture.
+Record storage and SpriteBatch drawing caches expose their owned references
+to Python's cyclic garbage collector. Native collection retains each batch,
+its cache and its storage until commands have been packed, rejecting edits or
+recursive collection during that interval. This includes callbacks from old
+texture finalizers. Per-record clipping states participate in frame change
+detection even when geometry is unchanged.
+
 Python handles composition, typed results, timeout policy and blocking PCM
 backpressure. Native code validates input and owns Apple framework resources.
 Delegate and render callbacks do not call Python. Asynchronous system services

@@ -17,6 +17,7 @@ from ._controls import Button, ControlStyle, Slider, Toggle
 from ._events import KeyEvent, WindowState
 from ._text_input import TextField, TextView, TextInputSession
 from ._sprite import NineSlice, Sprite, SpriteAtlas, SpriteFrame
+from ._sprite_batch import BatchSprite, SpriteBatch
 from ._particle import ParticleEmitter
 from ._tilemap import TileMap, TileSet, load_tiled
 from ._shader import ShaderNode
