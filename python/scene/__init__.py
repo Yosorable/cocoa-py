@@ -25,6 +25,11 @@ from ._camera import Camera
 from ._scene import Scene, run
 from ._image_data import ImageData
 
+from _cocoa import _scene_accel as _accel
+
+_accel._configure_ticks(Node._tick, Node._tick_self, Sprite._tick_self)
+del _accel
+
 
 _PHYSICS_NAMES = {
     'PhysicsBody', 'PhysicsJoint', 'PhysicsWorld', 'ChainShape',

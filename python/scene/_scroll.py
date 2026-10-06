@@ -368,7 +368,7 @@ class ScrollView(Node):
         while current is not self._content:
             if current is None or current is self:
                 raise ValueError("node must be a descendant of ScrollView.content")
-            transform = _mul(_matrix(current.position, current.rotation, current.scale), transform)
+            transform = _mul(current._local_matrix(), transform)
             current = current.parent
         bounds = node._bounds()
         if bounds is None:

@@ -67,6 +67,26 @@ class AudioTests(unittest.TestCase):
                 self.assertEqual(recorded.getnchannels(), 1)
                 self.assertEqual(recorded.getnframes(), 8820)
 
+    def test_coupled_and_independent_pitch_preserve_duration_and_tone(self):
+        sound = audio.tone(220, duration=1, volume=.3, sample_rate=22050)
+        self.addCleanup(sound.close)
+        cases = [(2 ** (semitones / 12), semitones) for semitones in (-24, -12, -2.31, 4.37, 12, 24)]
+        cases.extend(((1.5, 0), (.75, 5), (2, -12)))
+        for rate, semitones in cases:
+            with self.subTest(rate=rate, semitones=semitones):
+                with audio.mix(audio.Track(sound, rate=rate, semitones=semitones),
+                               sample_rate=22050, channels=1) as mixed:
+                    self.assertAlmostEqual(mixed.duration, 1 / rate, delta=1 / 22050)
+                    samples = array("f", mixed.to_pcm())
+                    # Omit converter priming and the final partial period.
+                    start, end = int(len(samples) * .25), int(len(samples) * .8)
+                    crossings = [index + samples[index] / (samples[index] - samples[index + 1])
+                                 for index in range(start, end - 1)
+                                 if samples[index] <= 0 < samples[index + 1]]
+                    self.assertGreater(len(crossings), 5)
+                    frequency = (len(crossings) - 1) * 22050 / (crossings[-1] - crossings[0])
+                    self.assertAlmostEqual(frequency, 220 * 2 ** (semitones / 12), delta=2)
+
     def test_memory_wav_decodes_without_playback(self):
         from io import BytesIO
         payload = BytesIO()

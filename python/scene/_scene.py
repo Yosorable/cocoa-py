@@ -235,9 +235,10 @@ class Scene(Node):
     @fps.setter
     def fps(self, value):
         target = max(1, int(value))
-        if target == self._fps:
+        if target == self._fps and self._fps_applied:
             return
         self._fps = int(_metal.set_target_fps(self._window._handle, target))
+        self._fps_applied = True
 
     # add / remove / clear / run_action / remove_action — inherited from Node
 
@@ -282,6 +283,7 @@ class Scene(Node):
         self.frame = 0
         self.elapsed = 0.0
         self._fps = 60
+        self._fps_applied = False
         self._prev_size = None
         self._interactive_nodes: list[Node] = []
         self._render_fingerprint = 0
@@ -406,21 +408,7 @@ class Scene(Node):
         if not getattr(self, "_ui_structure_dirty", True):
             return
         from ._text_input import _TextInput
-        layouts, events, inputs, focusable = [], [], [], []
-        def walk(node):
-            for child in list(node.children):
-                walk(child)
-            if node is self:
-                return
-            if getattr(node, "_layout", None) is not None:
-                layouts.append(node)
-            if getattr(node, "_dispatch_ui_events", None) is not None:
-                events.append(node)
-            if isinstance(node, _TextInput):
-                inputs.append(node)
-            if isinstance(node, _TextInput) or getattr(node, "_is_control", False):
-                focusable.append(node)
-        walk(self)
+        layouts, events, inputs, focusable = _scene_accel.ui_nodes(self, _TextInput)
         self._ui_layout_nodes, self._ui_event_nodes, self._input_control_nodes = layouts, events, inputs
         self._focusable_nodes = focusable
         self._ui_structure_dirty = False

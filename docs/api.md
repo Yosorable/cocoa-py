@@ -51,6 +51,31 @@ actions, hit testing, touch/mouse events and a physics world. `PhysicsBody`
 creates Box2D bodies. `scene.gpu` exposes Metal windows, buffers, textures,
 render/compute pipelines and blit operations for lower-level work.
 
+`Node.affine_transform` accepts `(a, b, c, d, tx, ty)` or `None`. It maps local
+points to `(a*x + c*y + tx, b*x + d*y + ty)` before the node's scale, rotation
+and position, with the same transform composition as an equivalent parent
+hierarchy. This lets sprite rigs provide shear and reflection directly without
+extra transform nodes. The matrix is copied to six finite floats; assigning
+`None` restores component-only transforms. Clipping, coordinate conversion,
+layout, cached Layers and capture use the composed transform.
+`HStack`, `VStack` and `ZStack` measure each child's local bounds after its affine
+matrix, scale and rotation. Spacing and alignment use the enclosing rectangle
+in the stack's coordinates. The stack sets the child's position on each layout
+pass; it compensates for translation within the affine matrix when aligning
+those bounds.
+As with other content changes inside a `Layer`, call `layer.invalidate()` after
+changing a child's transform.
+Layer caches align their raster bounds to local pixels, so equivalent transform
+chains do not shift the sampling grid when their enclosing bounds differ.
+
+`gpu.Frame.draw_many(primitive, draws, texture_index=0)` submits an ordered
+sequence of `(pipeline, texture, vertex_start, vertex_count)` entries using the
+currently bound vertex and fragment buffers. A `None` pipeline or texture keeps
+the preceding binding. The complete batch is validated before any draw is
+encoded, and its final bindings remain available to subsequent frame calls.
+Scene batches adjacent quad draws through this API without changing their
+depth, blend or clipping order.
+
 `Path` and `Polygon` tessellate curves and round strokes at the rendering
 resolution, accounting for display scale, node/parent and camera transforms,
 and capture size. Existing path commands need no changes. `curve_tolerance`

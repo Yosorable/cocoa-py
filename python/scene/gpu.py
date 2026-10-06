@@ -303,6 +303,38 @@ class Frame:
             raise RuntimeError("draw() called without set_vertex_buffer()")
         _metal.draw(window=self._wh, primitive=primitive, vertex_start=start, vertex_count=count)
 
+    def draw_many(self, primitive, draws, *, texture_index=0):
+        """Draw ordered (pipeline, texture, start, count) entries in one call.
+
+        None keeps the current pipeline or fragment texture. Vertex and
+        fragment buffers stay bound. All entries are validated before any
+        draw is encoded; successful calls leave the final bindings active.
+        """
+        encoded = []
+        pipeline, texture = self._pip, self._ft.get(texture_index)
+        for selected_pipeline, selected_texture, start, count in draws:
+            if selected_pipeline is not None:
+                pipeline = getattr(selected_pipeline, "handle", selected_pipeline)
+                if pipeline is None:
+                    raise RuntimeError("Cannot bind a closed Metal pipeline.")
+            if pipeline is None:
+                raise RuntimeError("draw_many() called without a pipeline")
+            handle = None
+            if selected_texture is not None:
+                handle = getattr(selected_texture, "handle", selected_texture)
+                if handle is None:
+                    raise RuntimeError("Cannot bind a closed Metal texture.")
+                texture = handle
+            encoded.append((pipeline, handle, start, count))
+        if not encoded:
+            return
+        if not self._vb:
+            raise RuntimeError("draw_many() called without set_vertex_buffer()")
+        _metal.draw_many(self._wh, primitive, encoded, texture_index)
+        self._pip = pipeline
+        if texture is not None:
+            self._ft[texture_index] = texture
+
     def draw_indexed(self, primitive, index_buffer, count, index_type="uint16", offset=0):
         if self._pip is None:
             raise RuntimeError("draw_indexed() called without set_pipeline()")

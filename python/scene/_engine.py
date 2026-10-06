@@ -643,7 +643,11 @@ class Renderer:
             sample_count=self._msaa if use_msaa_pass else 1,
             stencil=use_msaa_pass,
         ) as f:
+            pending_draws = []
             for start, end_or_idx, is_tex, tex in batches:
+                if start < 0 and pending_draws:
+                    f.draw_many("triangle", pending_draws)
+                    pending_draws.clear()
                 if start == -3:
                     buffers = clip_buffers[end_or_idx]
                     clipped = bool(buffers)
@@ -676,9 +680,9 @@ class Renderer:
                         f.set_fragment_buffer(qb, 0)
                         last_mode = 'quad'
                     p = self._scene_pipeline(("tp_add" if is_tex == 2 else "tp" if is_tex else "sp") + ("_ms" if use_msaa_pass else ""), clipped)
-                    f.set_pipeline(p)
-                    if is_tex and tex is not None: f.set_fragment_texture(tex, 0)
-                    f.draw("triangle", start * _VPQ, (end_or_idx - start) * _VPQ)
+                    pending_draws.append((p, tex if is_tex else None, start * _VPQ, (end_or_idx - start) * _VPQ))
+            if pending_draws:
+                f.draw_many("triangle", pending_draws)
 
     def render(self, cmds, *, clear_color=None, target_texture=None, viewport=None):
         # Use the same batch protocol for Python collection and native collect.

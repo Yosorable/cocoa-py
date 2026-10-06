@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import math
 
+from _cocoa import _scene_accel
+
 from ._common import (
     _IDENTITY, _apply, _avg_scale, _color, _identity, _invert, _matrix, _mul, _rot,
 )
@@ -16,13 +18,14 @@ class Node:
     collision_mask: int = 0xFFFFFFFF
 
     def __init__(self, *, x=0, y=0, position=None, rotation=0, scale=1, opacity=1, z=0, speed=1,
-                 clip=None):
+                 clip=None, affine_transform=None):
         if position is not None:
             x, y = position
         self.x = float(x)
         self.y = float(y)
         self.rotation = float(rotation)
         self.scale = float(scale) if isinstance(scale, (int, float)) else (float(scale[0]), float(scale[1]))
+        self.affine_transform = affine_transform
         self.opacity = float(opacity)
         self.z = float(z)
         self.speed = speed
@@ -39,6 +42,27 @@ class Node:
         self.physics_body = None
         self._world_clips = ()
         self.clip = clip
+
+    @property
+    def affine_transform(self):
+        """Optional (a, b, c, d, tx, ty) matrix, applied before this node's TRS.
+
+        Local points first pass through this matrix, then scale, rotation and
+        position. Children, clipping, hit testing and capture share the result.
+        Set to None to use position, rotation and scale alone.
+        """
+        return self._affine_transform
+
+    @affine_transform.setter
+    def affine_transform(self, value):
+        self._affine_transform = None if value is None else _scene_accel.affine(value)
+
+    def _local_matrix(self):
+        affine = self._affine_transform
+        if affine is not None and self.x == self.y == self.rotation == 0 and self.scale in (1, (1, 1)):
+            return affine
+        matrix = _matrix(self.position, self.rotation, self.scale)
+        return _mul(matrix, affine) if affine is not None else matrix
 
     @property
     def clip(self):
@@ -276,7 +300,7 @@ class Node:
         for node in reversed(chain):
             if node._screen_space:
                 world, clips = _IDENTITY, ()
-            world = _mul(world, _matrix(node.position, node.rotation, node.scale))
+            world = _mul(world, node._local_matrix())
             opacity *= node.opacity
             visible = visible and node.visible and opacity > .001
             clips = node._clip_state(world, clips)
@@ -320,13 +344,10 @@ class Node:
     # ── internal ──
 
     def _snap(self):
-        return (self.x, self.y, self.rotation, self.scale, self.opacity, self.z)
+        return (self.x, self.y, self.rotation, self.scale, self.opacity, self.z, self._affine_transform)
 
     def _tick(self, dt):
-        local_dt = dt * self.speed
-        self._tick_self(local_dt)
-        for c in list(self.children):
-            c._tick(local_dt)
+        _scene_accel.tick(self, dt)
 
     def _tick_self(self, dt):
         if self._actions:
@@ -345,7 +366,7 @@ class Node:
             parent_clips = ()
         else:
             parent_clips = parents
-        world = _mul(transform, _matrix(self.position, self.rotation, self.scale))
+        world = _mul(transform, self._local_matrix())
         clips = self._clip_state(world, parent_clips)
         self._world_clips = clips
         renderer._collect_clips = clips
@@ -370,7 +391,7 @@ class Node:
             return
         cache = self._cache
         if cache is not None:
-            snap = self._snap()
+            snap = (self._snap(), self._affine_transform)
             if (snap == cache[0]
                     and (transform is cache[1] or transform == cache[1])
                     and opacity == cache[2]
@@ -389,7 +410,7 @@ class Node:
                 for child in self.children:
                     child._collect(cmds, renderer, world, op, order)
                 return
-        world = _mul(transform, _matrix((self.x, self.y), self.rotation, self.scale))
+        world = _mul(transform, self._local_matrix())
         op = opacity * self.opacity
         self._world_transform = world
         self._world_opacity = op
@@ -399,7 +420,7 @@ class Node:
             cmd._clips = self._world_clips
             cmd._render_layer = getattr(renderer, "_collect_layer", 0)
             cmd._sort_scope = getattr(renderer, "_collect_sort_scope", ())
-        self._cache = (self._snap(), transform, opacity, world, op, cmds[mark:], renderer.screen_scale)
+        self._cache = ((self._snap(), self._affine_transform), transform, opacity, world, op, cmds[mark:], renderer.screen_scale)
         self._record_interaction(renderer, world, op, order[0])
         for child in self.children:
             child._collect(cmds, renderer, world, op, order)
@@ -533,7 +554,7 @@ class Layer(Node):
     def _collect_unclipped(self, cmds, renderer, transform, opacity, order):
         if not self.visible or opacity <= 0.001:
             return
-        world = _mul(transform, _matrix((self.x, self.y), self.rotation, self.scale))
+        world = _mul(transform, self._local_matrix())
         op = opacity * self.opacity
         self._world_transform = world
         self._world_opacity = op
@@ -666,8 +687,14 @@ class Layer(Node):
                 self._lsize = self._lcenter = None
                 self._rscale, self._dirty = rscale, False
                 return
-        lw = x1 - x0 if capture_viewport is not None else max(1.0, x1 - x0)
-        lh = y1 - y0 if capture_viewport is not None else max(1.0, y1 - y0)
+        # Keep the cache on a stable local pixel grid. Fractional bounds must
+        # not resample unchanged content when equivalent transform chains have
+        # different enclosing boxes, or when a neighboring child moves.
+        pixels_per_unit = renderer.screen_scale * rscale
+        x0, y0 = math.floor(x0 * pixels_per_unit) / pixels_per_unit, math.floor(y0 * pixels_per_unit) / pixels_per_unit
+        x1, y1 = math.ceil(x1 * pixels_per_unit) / pixels_per_unit, math.ceil(y1 * pixels_per_unit) / pixels_per_unit
+        lw = x1 - x0
+        lh = y1 - y0
         pw = max(1, int(round(lw * renderer.screen_scale * rscale)))
         ph = max(1, int(round(lh * renderer.screen_scale * rscale)))
         if self._tex is None or self._lsize != (lw, lh) or abs(self._rscale - rscale) > 1e-3:
@@ -722,7 +749,7 @@ def _measure_children(children):
     for c in children:
         if not c.visible:
             continue
-        m = _matrix((c.x, c.y), c.rotation, c.scale)
+        m = c._local_matrix()
         boxes = []
         bounds = c._bounds()
         if bounds is not None:

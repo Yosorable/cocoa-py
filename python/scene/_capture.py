@@ -120,7 +120,7 @@ def capture(node, *, rect=None, size=None, background=None):
         transform = _mul(shift, root._camera_root_transform())
         particle_transform = shift
     else:
-        local = _matrix(node.position, node.rotation, node.scale)
+        local = node._local_matrix()
         transform = _mul(shift, _inverse(local))
         ancestors = []
         current = node
@@ -131,7 +131,7 @@ def capture(node, *, rect=None, size=None, background=None):
         for ancestor in reversed(ancestors):
             if ancestor._screen_space:
                 world = _IDENTITY
-            world = _mul(world, _matrix(ancestor.position, ancestor.rotation, ancestor.scale))
+            world = _mul(world, ancestor._local_matrix())
         particle_transform = _mul(shift, _inverse(world))
 
     texture = None

@@ -35,6 +35,17 @@ these binaries in a directory does not combine their engine state or dependencie
 
 ## Native boundaries
 
+Scene node updates use native traversal while actions, sprite animation and
+custom update callbacks execute in Python. Traversal preserves inherited speed,
+callback order and the child snapshot taken after each node's own update. Only
+the original idle Node and Sprite callbacks can be skipped; overridden hooks,
+hidden nodes and zero-speed nodes keep their existing update behavior.
+
+Rebuilding layout, event, text-input and focus registries also uses native
+traversal. It preserves postorder, each parent's child snapshot and Python
+descriptor access, including errors and mutations during inspection. Registry
+lists are replaced only after a successful scan.
+
 Python handles composition, typed results, timeout policy and blocking PCM
 backpressure. Native code validates input and owns Apple framework resources.
 Delegate and render callbacks do not call Python. Asynchronous system services
@@ -72,6 +83,18 @@ Playback and recording resources keep their existing explicit lifecycle APIs.
 Active one-shot audio playback can outlive an unreferenced Python Channel until
 native playback completes. Offline audio uses its own rendering engine and does
 not require a live audio device.
+
+Completed PCM playback can return its player, varispeed and time-pitch nodes to a bounded
+cache of sixteen idle voices. Reuse requires a matching audio format and no
+per-channel effects. A naturally completed player can keep its empty transport
+running; each new channel records a source-time origin and retains its own
+controls and completion generation. Idle and neutral processing units are
+bypassed. Coupled rate and pitch settings use varispeed resampling; independent
+settings retain time stretching. Both units stay connected so live controls do
+not require rebuilding the graph. Offline rendering uses the same selection.
+Explicit stop still cancels playback, while stop-all, engine close and
+configuration changes detach cached voices. File streams keep their existing
+independent lifecycle.
 
 ## Hosts and file access
 

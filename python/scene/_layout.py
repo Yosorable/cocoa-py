@@ -1,6 +1,7 @@
 """scene._layout — Layout container nodes."""
 from __future__ import annotations
 
+from ._common import _apply, _matrix, _mul
 from ._enums import Alignment
 from ._node import Node, Group, _measure_children
 
@@ -14,9 +15,21 @@ def _find_renderer(node):
 
 def _layout_bounds(node, renderer):
     measure = getattr(node, '_layout_bounds', None)
-    if measure is not None:
-        return measure(renderer)
-    return node._bounds()
+    bounds = measure(renderer) if measure is not None else node._bounds()
+    if bounds is None:
+        return None
+    # Stacks supply position. Exclude that translation from measurement so
+    # repeated layout passes do not depend on the previously assigned position.
+    transform = node.affine_transform
+    if node.rotation != 0 or node.scale not in (1, (1, 1)):
+        components = _matrix((0, 0), node.rotation, node.scale)
+        transform = _mul(components, transform) if transform is not None else components
+    if transform is None:
+        return bounds
+    x0, y0, x1, y1 = bounds
+    points = [_apply(transform, (x, y)) for x in (x0, x1) for y in (y0, y1)]
+    return (min(x for x, _ in points), min(y for _, y in points),
+            max(x for x, _ in points), max(y for _, y in points))
 
 
 class Spacer(Node):

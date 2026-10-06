@@ -212,7 +212,16 @@ static PyObject *audio_render_open(PyObject *, PyObject *args) {
                 track.player = [AVAudioPlayerNode new]; [engine attachNode:track.player];
                 AVAudioNode *previous = track.player;
                 if (rate != 1 || semitones != 0) {
-                    AVAudioUnitTimePitch *node = [AVAudioUnitTimePitch new]; node.rate = rate; node.pitch = semitones * 100;
+                    AVAudioNode *node;
+                    if (coupledPlaybackPitch((float)rate, (float)semitones)) {
+                        AVAudioUnitVarispeed *speed = [AVAudioUnitVarispeed new];
+                        speed.rate = rate;
+                        node = speed;
+                    } else {
+                        AVAudioUnitTimePitch *stretch = [AVAudioUnitTimePitch new];
+                        stretch.rate = rate; stretch.pitch = semitones * 100;
+                        node = stretch;
+                    }
                     [engine attachNode:node]; [engine connect:previous to:node format:track.playbackFormat]; previous = node;
                 }
                 AVAudioMixerNode *mixer = [AVAudioMixerNode new]; [engine attachNode:mixer];

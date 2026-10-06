@@ -22,6 +22,7 @@ using CocoaColor = NSColor;
 #include <cmath>
 #include <mach/mach.h>
 #include <mutex>
+#include <new>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -1589,6 +1590,96 @@ static PyObject *metal_draw(PyObject *self, PyObject *args, PyObject *kwargs) {
     Py_RETURN_NONE;
 }
 
+static PyObject *metal_draw_many(PyObject *, PyObject *args) {
+    long long windowHandle, textureIndex = 0;
+    const char *primitive;
+    PyObject *input;
+    if (!PyArg_ParseTuple(args, "LsO|L", &windowHandle, &primitive, &input, &textureIndex)) return nullptr;
+    if (textureIndex < 0 || textureIndex >= 128) {
+        PyErr_SetString(PyExc_ValueError, "texture_index must be between 0 and 127");
+        return nullptr;
+    }
+    const std::string primitiveName(primitive);
+    if (primitiveName != "point" && primitiveName != "line" && primitiveName != "line_strip" &&
+        primitiveName != "triangle" && primitiveName != "triangle_strip") {
+        PyErr_SetString(PyExc_ValueError, "Unknown Metal primitive type");
+        return nullptr;
+    }
+    struct Draw {
+        long long pipeline, texture, start, count;
+        bool hasTexture;
+    };
+    PyObject *sequence = PySequence_Tuple(input);
+    if (!sequence) return nullptr;
+    const Py_ssize_t size = PyTuple_GET_SIZE(sequence);
+    std::vector<Draw> draws;
+    try {
+        draws.reserve((size_t)size);
+    } catch (const std::bad_alloc &) {
+        Py_DECREF(sequence);
+        return PyErr_NoMemory();
+    }
+    // Conversion may execute __index__ or iteration callbacks. Finish it
+    // before taking the native resource lock or encoding any commands.
+    for (Py_ssize_t i = 0; i < size; i++) {
+        PyObject *entry = PySequence_Tuple(PyTuple_GET_ITEM(sequence, i));
+        if (!entry) { Py_DECREF(sequence); return nullptr; }
+        if (PyTuple_GET_SIZE(entry) != 4) {
+            Py_DECREF(entry); Py_DECREF(sequence);
+            PyErr_SetString(PyExc_ValueError, "Each draw must contain four values");
+            return nullptr;
+        }
+        Draw draw = {};
+        draw.hasTexture = PyTuple_GET_ITEM(entry, 1) != Py_None;
+        auto number = [&](int index, long long &result) {
+            result = PyLong_AsLongLong(PyTuple_GET_ITEM(entry, index));
+            return !PyErr_Occurred();
+        };
+        bool converted = number(0, draw.pipeline) && (!draw.hasTexture || number(1, draw.texture)) &&
+                         number(2, draw.start) && number(3, draw.count);
+        Py_DECREF(entry);
+        if (!converted) { Py_DECREF(sequence); return nullptr; }
+        if (draw.start < 0 || draw.count < 0) {
+            Py_DECREF(sequence);
+            PyErr_SetString(PyExc_ValueError, "Draw start and count must be nonnegative");
+            return nullptr;
+        }
+        draws.push_back(draw);
+    }
+    Py_DECREF(sequence);
+
+    std::lock_guard<std::mutex> lock(gStateMutex);
+    WindowRecord *window = windowRecord(windowHandle);
+    if (!window) {
+        PyErr_SetString(PyExc_KeyError, "_metal window handle not found.");
+        return nullptr;
+    }
+    if (!window->frameActive || !window->encoder) {
+        PyErr_SetString(PyExc_RuntimeError, "begin_frame() must be called before draw_many().");
+        return nullptr;
+    }
+    for (const Draw &draw : draws) {
+        if (!pipelineRecord(draw.pipeline) || (draw.hasTexture && !textureRecord(draw.texture))) {
+            PyErr_SetString(PyExc_KeyError, "_metal pipeline or texture handle not found.");
+            return nullptr;
+        }
+    }
+    const MTLPrimitiveType type = primitiveTypeFromName(primitiveName);
+    long long pipeline = 0, texture = 0;
+    for (const Draw &draw : draws) {
+        if (pipeline != draw.pipeline) {
+            [window->encoder setRenderPipelineState:pipelineRecord(draw.pipeline)->pipeline];
+            pipeline = draw.pipeline;
+        }
+        if (draw.hasTexture && texture != draw.texture) {
+            [window->encoder setFragmentTexture:textureRecord(draw.texture)->texture atIndex:(NSUInteger)textureIndex];
+            texture = draw.texture;
+        }
+        [window->encoder drawPrimitives:type vertexStart:(NSUInteger)draw.start vertexCount:(NSUInteger)draw.count];
+    }
+    Py_RETURN_NONE;
+}
+
 static PyObject *metal_end_frame(PyObject *self, PyObject *args) {
     (void)self;
     long long windowHandle = 0;
@@ -2641,6 +2732,7 @@ static PyMethodDef metalMethods[] = {
     {"set_fragment_buffer", (PyCFunction)metal_set_fragment_buffer, METH_VARARGS | METH_KEYWORDS, "Bind a fragment buffer for the active frame."},
     {"set_fragment_texture", (PyCFunction)metal_set_fragment_texture, METH_VARARGS | METH_KEYWORDS, "Bind a fragment texture for the active frame."},
     {"draw", (PyCFunction)metal_draw, METH_VARARGS | METH_KEYWORDS, "Issue a draw call for the active frame."},
+    {"draw_many", metal_draw_many, METH_VARARGS, "Validate and encode an ordered batch of draw calls."},
     {"draw_indexed", (PyCFunction)metal_draw_indexed, METH_VARARGS | METH_KEYWORDS, "Issue an indexed draw call."},
     {"draw_instanced", (PyCFunction)metal_draw_instanced, METH_VARARGS | METH_KEYWORDS, "Issue an instanced draw call."},
     {"draw_indexed_instanced", (PyCFunction)metal_draw_indexed_instanced, METH_VARARGS | METH_KEYWORDS, "Issue an indexed instanced draw call."},

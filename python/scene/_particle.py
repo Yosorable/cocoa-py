@@ -173,7 +173,7 @@ class ParticleEmitter(Node):
     def _collect_unclipped(self, cmds, renderer, transform, opacity, order):
         if not self.visible or opacity <= 0.001:
             return
-        world = _mul(transform, _matrix((self.x, self.y), self.rotation, self.scale))
+        world = _mul(transform, self._local_matrix())
         op = opacity * self.opacity
         self._world_transform = world
         self._world_opacity = op

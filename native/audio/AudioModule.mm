@@ -71,6 +71,7 @@ struct ChannelRecord {
     long long handle;
     long long soundHandle;
     __strong AVAudioPlayerNode *player;
+    __strong AVAudioUnitVarispeed *varispeed;
     __strong AVAudioUnitTimePitch *timePitch;
     __strong AVAudioMixerNode *effectMixer;
     BOOL isMusic;
@@ -84,6 +85,8 @@ struct ChannelRecord {
     double duration = 0;
     double positionOffset = 0;  // source position at the start of this schedule
     double pausedPosition = 0;
+    AVAudioFramePosition timelineOrigin = 0;
+    BOOL warmPlayback = NO;
     float volume;
     float pan;
     float pitch;  // playback rate
@@ -115,6 +118,15 @@ static std::unordered_map<long long, SoundRecord> gSounds;
 static std::unordered_map<long long, ChannelRecord> gChannels;
 static __strong AVAudioEngine *gEngine = nil;
 static __strong AVAudioMixerNode *gMixer = nil;
+struct IdleVoice {
+    __strong AVAudioPlayerNode *player;
+    __strong AVAudioUnitVarispeed *varispeed;
+    __strong AVAudioUnitTimePitch *timePitch;
+    __strong AVAudioFormat *format;
+};
+static std::vector<IdleVoice> gIdleVoices;
+static constexpr size_t kMaxIdleVoices = 16;
+static unsigned long long gVoicesCreated = 0, gVoicesReused = 0;
 static dispatch_queue_t gLoadQueue = nullptr;  // serial queue for async decode
 static __strong AVAudioUnitReverb *gReverb = nil;
 static __strong AVAudioUnitEQ *gEQ = nil;
@@ -278,7 +290,7 @@ static NSString *resolveAudioPath(const char *path) {
     return [cwd stringByAppendingPathComponent:p];
 }
 
-static void disconnectChannel(ChannelRecord *ch);
+static void disconnectChannel(ChannelRecord *ch, bool reuse = false, bool finished = false);
 static void completeChannel(long long handle, BOOL stopped = NO);
 
 static BOOL raiseAudioError(NSString *error) {
@@ -313,7 +325,7 @@ static double channelPosition(ChannelRecord *ch) {
         AVAudioTime *time = [ch->player playerTimeForNodeTime:nodeTime];
         double sr = channelFormat(ch).sampleRate;
         if (time && time.isSampleTimeValid && sr > 0)
-            pos += (double)time.sampleTime / sr;
+            pos += (double)(time.sampleTime - ch->timelineOrigin) / sr;
     }
     if (ch->looping && ch->duration > 0) pos = fmod(pos, ch->duration);
     return std::clamp(pos, 0.0, ch->duration);
@@ -353,7 +365,8 @@ static NSString *startChannelPlayback(ChannelRecord *ch) {
     @try {
         NSString *error = restartAudioEngine();
         if (error) return error;
-        if (channelReady(ch)) [ch->player play];
+        if (channelReady(ch) && (!ch->warmPlayback || !ch->player.isPlaying)) [ch->player play];
+        ch->warmPlayback = NO;
         ch->resumePending = NO;
     } @catch (NSException *exception) {
         return exception.reason ?: @"Cannot resume audio playback.";
@@ -447,6 +460,12 @@ static BOOL rescheduleFromPosition(ChannelRecord *ch, double posSec) {
     AVAudioFrameCount startFrame = (AVAudioFrameCount)(std::clamp(posSec, 0.0, lastPosition) * sr);
     ch->positionOffset = (double)startFrame / sr;
     ch->pausedPosition = ch->positionOffset;
+    ch->timelineOrigin = 0;
+    if (ch->warmPlayback) {
+        AVAudioTime *renderTime = ch->player.lastRenderTime;
+        AVAudioTime *playerTime = renderTime ? [ch->player playerTimeForNodeTime:renderTime] : nil;
+        if (playerTime.isSampleTimeValid) ch->timelineOrigin = playerTime.sampleTime;
+    }
     AVAudioPCMBuffer *buffer = ch->soundBuffer;
     if (startFrame > 0) {
         AVAudioFrameCount remain = totalFrames - startFrame;
@@ -483,15 +502,77 @@ static BOOL rescheduleFromPosition(ChannelRecord *ch, double posSec) {
     return YES;
 }
 
-/* Connect a channel's node chain dynamically.
-   Only Player + TimePitch are always present; effect nodes are wired
-   only when non-nil (created lazily on first use).
-   Chain: Player → TimePitch → [active effects...] → Mixer */
+/* A coupled rate/pitch change is resampling, not independent time stretching.
+   Allow float rounding of either public parameter, but keep independent changes
+   on TimePitch. Both processors remain connected for live parameter changes. */
+static bool coupledPlaybackPitch(float rate, float semitones) {
+    const float shiftedRate = std::exp2(semitones / 12.0f);
+    const float tolerance = 2.0f * std::numeric_limits<float>::epsilon() * std::max(rate, shiftedRate);
+    return std::abs(rate - shiftedRate) <= tolerance;
+}
+
+/* Chain: Player → Varispeed → TimePitch → [active effects...] → Mixer. */
+static void applyChannelPitch(ChannelRecord *ch) {
+    const bool coupled = coupledPlaybackPitch(ch->pitch, ch->semitones);
+    const float speed = coupled ? ch->pitch : 1.0f;
+    const float stretch = coupled ? 1.0f : ch->pitch;
+    const float cents = coupled ? 0.0f : ch->semitones * 100.0f;
+    if (ch->varispeed.rate != speed) ch->varispeed.rate = speed;
+    if (ch->varispeed.bypass != (speed == 1.0f)) ch->varispeed.bypass = speed == 1.0f;
+    if (ch->timePitch.rate != stretch) ch->timePitch.rate = stretch;
+    if (ch->timePitch.pitch != cents) ch->timePitch.pitch = cents;
+    const BOOL bypass = stretch == 1.0f && cents == 0.0f;
+    if (ch->timePitch.bypass != bypass) ch->timePitch.bypass = bypass;
+}
+
+static void clearIdleVoices(void) {
+    for (auto &voice : gIdleVoices) {
+        @try {
+            [voice.player stop];
+            if (voice.player.engine) [gEngine detachNode:voice.player];
+            if (voice.varispeed.engine) [gEngine detachNode:voice.varispeed];
+            if (voice.timePitch.engine) [gEngine detachNode:voice.timePitch];
+        } @catch (NSException *) { }
+    }
+    gIdleVoices.clear();
+}
+
 static void connectChannel(ChannelRecord *ch) {
     AVAudioFormat *fmt = channelFormat(ch);
+    if (!ch->player) {
+        bool plain = !ch->streamFile && !ch->effectMixer && !ch->chReverb && !ch->chDelay && !ch->chDistortion && !ch->chEQ;
+        for (size_t i = plain ? gIdleVoices.size() : 0; i > 0; --i) {
+            auto &voice = gIdleVoices[i - 1];
+            if (voice.player.engine == gEngine && voice.varispeed.engine == gEngine && voice.timePitch.engine == gEngine
+                && [voice.format isEqual:fmt]) {
+                ch->player = voice.player;
+                ch->varispeed = voice.varispeed;
+                ch->timePitch = voice.timePitch;
+                ch->warmPlayback = ch->player.isPlaying;
+                gIdleVoices.erase(gIdleVoices.begin() + (i - 1));
+                ++gVoicesReused;
+                // Stop the empty warm transport before scheduling so this
+                // paused pending channel starts on a fresh timeline.
+                if (ch->paused && ch->warmPlayback) {
+                    [ch->player stop];
+                    [ch->varispeed reset];
+                    ch->warmPlayback = NO;
+                }
+                applyChannelPitch(ch);
+                return;
+            }
+        }
+        ch->player = [[AVAudioPlayerNode alloc] init];
+        ch->varispeed = [[AVAudioUnitVarispeed alloc] init];
+        ch->timePitch = [[AVAudioUnitTimePitch alloc] init];
+        ++gVoicesCreated;
+    }
+    applyChannelPitch(ch);
     [gEngine attachNode:ch->player];
+    [gEngine attachNode:ch->varispeed];
     [gEngine attachNode:ch->timePitch];
-    [gEngine connect:ch->player to:ch->timePitch format:fmt];
+    [gEngine connect:ch->player to:ch->varispeed format:fmt];
+    [gEngine connect:ch->varispeed to:ch->timePitch format:fmt];
 
     AVAudioNode *prev = ch->timePitch;
     AVAudioNode *effects[] = {ch->chReverb, ch->chDelay, ch->chDistortion, ch->chEQ};
@@ -515,12 +596,36 @@ static void connectChannel(ChannelRecord *ch) {
 }
 
 /* Disconnect and detach all of a channel's nodes */
-static void disconnectChannel(ChannelRecord *ch) {
+static void disconnectChannel(ChannelRecord *ch, bool reuse, bool finished) {
     ch->generation++;
+    // Finished handles keep only query state. The stopped nodes may serve a
+    // new handle without rebuilding the running engine graph for each sound.
+    if (reuse && !ch->error && ch->soundBuffer && !ch->streamFile
+        && ch->player.engine == gEngine && ch->varispeed.engine == gEngine && ch->timePitch.engine == gEngine
+        && !ch->effectMixer && !ch->chReverb && !ch->chDelay && !ch->chDistortion && !ch->chEQ
+        && gIdleVoices.size() < kMaxIdleVoices) {
+        @try {
+            // Natural completion keeps the cached player's timeline running.
+            // Reset resampling history only when stopping resets that timeline;
+            // otherwise a later iOS render can overrun the resampler buffer.
+            if (!finished) {
+                [ch->player stop];
+                [ch->varispeed reset];
+            }
+            ch->varispeed.bypass = YES;
+            [ch->timePitch reset];
+            ch->timePitch.bypass = YES;
+            gIdleVoices.push_back({ch->player, ch->varispeed, ch->timePitch, channelFormat(ch)});
+            ch->player = nil;
+            ch->varispeed = nil;
+            ch->timePitch = nil;
+            return;
+        } @catch (NSException *) { }
+    }
     @try {
         if (ch->player) [ch->player stop];
         /* Detach removes all connections automatically */
-        AVAudioNode *nodes[] = {ch->player, ch->timePitch, ch->effectMixer,
+        AVAudioNode *nodes[] = {ch->player, ch->varispeed, ch->timePitch, ch->effectMixer,
                                 ch->chReverb, ch->chDelay,
                                 ch->chDistortion, ch->chEQ};
         for (AVAudioNode *n : nodes) {
@@ -544,8 +649,9 @@ static void completeChannel(long long handle, BOOL stopped) {
     ch->stopped = stopped;
     pushAudioEvent(AudioEventKind::PlaybackEnded, handle,
                    ch->error ? "failed" : stopped ? "stopped" : "finished", ch->error);
-    disconnectChannel(ch);
+    disconnectChannel(ch, true, !stopped);
     ch->player = nil;
+    ch->varispeed = nil;
     ch->timePitch = nil;
     ch->soundBuffer = nil;
     ch->streamFile = nil;
@@ -556,6 +662,54 @@ static void completeChannel(long long handle, BOOL stopped) {
     ch->resumePending = NO;
     ch->fadeActive = NO;
     if (ch->ownerReleased) gChannels.erase(it);
+}
+
+static void suspendChannelsForEngineStop(std::vector<long long> &suspendedChannels) {
+    // Idle transports also lose their engine timeline during recording setup.
+    clearIdleVoices();
+    suspendedChannels.reserve(gChannels.size());
+    for (auto &entry : gChannels) {
+        auto &ch = entry.second;
+        if (ch.completed || !channelReady(&ch)) continue;
+        double position = channelPosition(&ch);
+        suspendedChannels.push_back(ch.handle);
+        // Engine stop can discard queued audio without clearing isPlaying.
+        // Invalidate callbacks and freeze source position before stopping.
+        ++ch.generation;
+        ch.positionOffset = ch.pausedPosition = position;
+        ch.resumePending = !ch.paused;
+        [ch.player stop];
+    }
+}
+
+// Called after recording setup has stopped the old player and saved its position.
+static void restoreChannelAfterEngineStop(ChannelRecord *ch) {
+    // Recreate the transport and both processors together so completion latency
+    // and resampling history belong to the replacement player's timeline.
+    // Keep the existing downstream effects and mixer input connection.
+    AVAudioConnectionPoint *destination = [gEngine outputConnectionPointsForNode:ch->timePitch outputBus:0].firstObject;
+    AVAudioNode *nodes[] = {ch->player, ch->varispeed, ch->timePitch};
+    for (AVAudioNode *node : nodes) {
+        if (node.engine) [gEngine detachNode:node];
+    }
+    ch->player = [AVAudioPlayerNode new];
+    ch->varispeed = [AVAudioUnitVarispeed new];
+    ch->timePitch = [AVAudioUnitTimePitch new];
+    ++gVoicesCreated;
+    ch->warmPlayback = NO;
+    ch->timelineOrigin = 0;
+    applyChannelPitch(ch);
+    [gEngine attachNode:ch->player];
+    [gEngine attachNode:ch->varispeed];
+    [gEngine attachNode:ch->timePitch];
+    [gEngine connect:ch->player to:ch->varispeed format:channelFormat(ch)];
+    [gEngine connect:ch->varispeed to:ch->timePitch format:channelFormat(ch)];
+    [gEngine connect:ch->timePitch to:destination.node fromBus:0 toBus:destination.bus format:channelFormat(ch)];
+    ch->player.volume = ch->volume * gMasterVolume;
+    ch->player.pan = ch->pan;
+    if (rescheduleFromPosition(ch, ch->pausedPosition)
+        && !ch->paused && gEngine.isRunning)
+        ch->error = startChannelPlayback(ch);
 }
 
 /* Rebuild a channel's audio chain after adding an effect node.
@@ -570,7 +724,7 @@ static BOOL rebuildChannelChain(ChannelRecord *ch) {
 
             /* Stop/detach; stale completion handlers are dispatched to the main queue. */
             [ch->player stop];
-            AVAudioNode *nodes[] = {ch->player, ch->timePitch, ch->effectMixer,
+            AVAudioNode *nodes[] = {ch->player, ch->varispeed, ch->timePitch, ch->effectMixer,
                                     ch->chReverb, ch->chDelay, ch->chDistortion, ch->chEQ};
             for (AVAudioNode *n : nodes) {
                 if (n && n.engine) [gEngine detachNode:n];
@@ -625,8 +779,6 @@ static void fulfillPendingPlays(SoundRecord *snd) {
             connectChannel(crec);
             crec->player.volume = crec->volume * gMasterVolume;
             crec->player.pan = crec->pan;
-            crec->timePitch.rate = crec->pitch;
-            crec->timePitch.pitch = crec->semitones * 100;
             if (!rescheduleFromPosition(crec, crec->positionOffset)) {
                 completeChannel(handle);
                 continue;
@@ -1155,17 +1307,10 @@ static PyObject *audio_play(PyObject *self, PyObject *args, PyObject *kwargs) {
     if (raiseAudioError(snd->error)) return nullptr;
 
     @autoreleasepool {
-        AVAudioPlayerNode *player = [[AVAudioPlayerNode alloc] init];
-        AVAudioUnitTimePitch *tp = [[AVAudioUnitTimePitch alloc] init];
-        tp.rate = pitch;
-        tp.pitch = semitones * 100;
-
         long long ch = nextHandle();
         ChannelRecord rec;
         rec.handle = ch;
         rec.soundHandle = soundH;
-        rec.player = player;
-        rec.timePitch = tp;
         rec.isMusic = music ? YES : NO;
         rec.looping = loop ? YES : NO;
         rec.paused = NO;
@@ -1217,8 +1362,8 @@ static PyObject *audio_play(PyObject *self, PyObject *args, PyObject *kwargs) {
         ChannelRecord *crec = &gChannels[ch];
         @try {
             connectChannel(crec);
-            player.volume = volume * gMasterVolume;
-            player.pan = pan;
+            crec->player.volume = volume * gMasterVolume;
+            crec->player.pan = pan;
             if (rescheduleFromPosition(crec, 0)) crec->error = startChannelPlayback(crec);
         } @catch (NSException *exception) {
             crec->error = exception.reason ?: @"Cannot start audio playback.";
@@ -1244,7 +1389,7 @@ static PyObject *audio_stop(PyObject *self, PyObject *args) {
     if (it != gChannels.end()) {
         if (!it->second.completed) pushAudioEvent(AudioEventKind::PlaybackEnded, h, "stopped");
         @autoreleasepool {
-            disconnectChannel(&it->second);
+            disconnectChannel(&it->second, true);
         }
         gChannels.erase(it);
     }
@@ -1341,7 +1486,7 @@ static PyObject *audio_set_pitch(PyObject *self, PyObject *args) {
     ChannelRecord *ch = channelRecord(h);
     if (ch && !ch->completed) {
         ch->pitch = rate;
-        if (ch->timePitch) ch->timePitch.rate = rate;
+        if (ch->timePitch) applyChannelPitch(ch);
     }
     Py_RETURN_NONE;
 }
@@ -1501,6 +1646,7 @@ static PyObject *audio_stop_all(PyObject *self, PyObject *args) {
         }
     }
     gChannels.clear();
+    clearIdleVoices();
     for (auto &pair : gOutputs) closeOutput(pair.second);
     gOutputs.clear();
     Py_RETURN_NONE;
@@ -1655,12 +1801,13 @@ static PyObject *audio_channel_seek(PyObject *self, PyObject *args) {
     std::lock_guard<std::mutex> lock(gMutex);
     ChannelRecord *ch = channelRecord(h);
     if (ch && raiseAudioError(ch->error)) return nullptr;
-    if (!ch || !ch->player || ch->completed) Py_RETURN_NONE;
+    if (!ch || ch->completed) Py_RETURN_NONE;
     if (!channelReady(ch)) {
         ch->positionOffset = std::clamp(time, 0.0, ch->duration);
         ch->pausedPosition = ch->positionOffset;
         Py_RETURN_NONE;
     }
+    if (!ch->player) Py_RETURN_NONE;
 
     @try {
         [ch->player stop];
@@ -1945,40 +2092,13 @@ static PyObject *audio_recorder_start(PyObject *self, PyObject *args, PyObject *
         auto rec = std::make_shared<RecorderRecord>();
         rec->handle = startHandle;
         std::vector<long long> suspendedChannels;
-        auto suspendPlayback = [&] {
-            suspendedChannels.reserve(gChannels.size());
-            for (auto &entry : gChannels) {
-                auto &ch = entry.second;
-                if (ch.completed || !channelReady(&ch)) continue;
-                double position = channelPosition(&ch);
-                suspendedChannels.push_back(ch.handle);
-                // Engine stop can discard queued audio without clearing isPlaying.
-                // Invalidate callbacks before stopping any player, and freeze its
-                // source position until the replacement schedule starts.
-                ++ch.generation;
-                ch.positionOffset = ch.pausedPosition = position;
-                ch.resumePending = !ch.paused;
-                [ch.player stop];
-            }
-        };
         auto restorePlayback = [&]() -> NSString * {
             NSString *error = nil;
             for (long long handle : suspendedChannels) {
                 auto ch = channelRecord(handle);
                 if (!ch || ch->completed) continue;
                 @try {
-                    // Reusing a player after engine stop can lose played-back
-                    // callbacks even after buffers are rescheduled. Replace just
-                    // the player, retaining TimePitch and the channel's effects.
-                    if (ch->player.engine) [engine detachNode:ch->player];
-                    ch->player = [AVAudioPlayerNode new];
-                    [engine attachNode:ch->player];
-                    [engine connect:ch->player to:ch->timePitch format:channelFormat(ch)];
-                    ch->player.volume = ch->volume * gMasterVolume;
-                    ch->player.pan = ch->pan;
-                    if (rescheduleFromPosition(ch, ch->pausedPosition)
-                        && !ch->paused && engine.isRunning)
-                        ch->error = startChannelPlayback(ch);
+                    restoreChannelAfterEngineStop(ch);
                 } @catch (NSException *exception) {
                     ch->error = exception.reason ?: @"Cannot restore playback after recording setup.";
                 }
@@ -2009,7 +2129,7 @@ static PyObject *audio_recorder_start(PyObject *self, PyObject *args, PyObject *
         };
 
         @try {
-            suspendPlayback();
+            suspendChannelsForEngineStop(suspendedChannels);
             if (wasRunning) [engine stop];
 #if COCOA_PY_AUDIO_SESSION
             if (![session setCategory:AVAudioSessionCategoryPlayAndRecord
@@ -2255,6 +2375,8 @@ static PyObject *audio_close(PyObject *self, PyObject *args) {
             disconnectChannel(&pair.second);
         }
         gChannels.clear();
+        clearIdleVoices();
+        gVoicesCreated = gVoicesReused = 0;
         gSounds.clear();
 
         /* Remove notification observers */
@@ -2364,6 +2486,7 @@ static void setupNotifications(void) {
         dispatch_async(queue, ^{
             std::lock_guard<std::mutex> lock(gMutex);
             if (gAudioEpoch != epoch || !gEngine) return;
+            clearIdleVoices();
             if (!gInterrupted) {
                 NSString *error = restartAudioEngine();
                 if (error) pushAudioEvent(AudioEventKind::EngineError, 0, "", error);
@@ -2378,7 +2501,23 @@ static void setupNotifications(void) {
 /* Module definition                                                       */
 /* ─────────────────────────────────────────────────────────────────────── */
 
+static PyObject *audio_voice_cache_info(PyObject *, PyObject *) {
+    std::lock_guard<std::mutex> lock(gMutex);
+    Py_ssize_t resampling = 0, stretching = 0;
+    for (const auto &pair : gChannels) {
+        const ChannelRecord &channel = pair.second;
+        if (channel.completed) continue;
+        if (channel.varispeed && !channel.varispeed.bypass) ++resampling;
+        if (channel.timePitch && !channel.timePitch.bypass) ++stretching;
+    }
+    return Py_BuildValue("{s:n,s:n,s:K,s:K,s:n,s:n}",
+                        "idle", (Py_ssize_t)gIdleVoices.size(), "capacity", (Py_ssize_t)kMaxIdleVoices,
+                        "created", gVoicesCreated, "reused", gVoicesReused,
+                        "resampling", resampling, "stretching", stretching);
+}
+
 static PyMethodDef audioMethods[] = {
+    {"_voice_cache_info", audio_voice_cache_info, METH_NOARGS, "Internal idle playback-node cache counters."},
     {"channel_status", audio_channel_status, METH_VARARGS, "Channel lifecycle state and optional error."},
     {"get_events", audio_get_events, METH_VARARGS, "Consume bounded native audio events without waiting."},
     {"get_device_info", audio_get_device_info, METH_NOARGS, "Query routes, latency and permission without activating audio."},

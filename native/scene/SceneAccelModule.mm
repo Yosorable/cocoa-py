@@ -61,8 +61,10 @@ enum {
 /* Interned attribute name strings (initialized on first use)              */
 /* ─────────────────────────────────────────────────────────────────────── */
 
-static PyObject *s_x, *s_y, *s_rotation, *s_scale, *s_opacity, *s_z;
+static PyObject *s_x, *s_y, *s_rotation, *s_scale, *s_opacity, *s_z, *s__affine_transform;
 static PyObject *s_visible, *s_children, *s__c_cache;
+static PyObject *s_speed, *s__tick, *s__tick_self, *s__actions, *s__anim_frames;
+static PyObject *s__layout, *s__dispatch_ui_events, *s__is_control;
 static PyObject *s_radius, *s_fill, *s_stroke, *s_stroke_width;
 static PyObject *s_width, *s_height, *s_color;
 static PyObject *s_start, *s_end;
@@ -104,7 +106,12 @@ static int intern_strings(void) {
     #define INTERN(var, name) var = PyUnicode_InternFromString(name); if (!var) return -1
     INTERN(s_x, "x"); INTERN(s_y, "y"); INTERN(s_rotation, "rotation");
     INTERN(s_scale, "scale"); INTERN(s_opacity, "opacity"); INTERN(s_z, "z");
+    INTERN(s__affine_transform, "_affine_transform");
     INTERN(s_visible, "visible"); INTERN(s_children, "children"); INTERN(s__c_cache, "_c_cache");
+    INTERN(s_speed, "speed"); INTERN(s__tick, "_tick"); INTERN(s__tick_self, "_tick_self");
+    INTERN(s__actions, "_actions"); INTERN(s__anim_frames, "_anim_frames");
+    INTERN(s__layout, "_layout"); INTERN(s__dispatch_ui_events, "_dispatch_ui_events");
+    INTERN(s__is_control, "_is_control");
     INTERN(s_radius, "radius"); INTERN(s_fill, "fill"); INTERN(s_stroke, "stroke");
     INTERN(s_stroke_width, "stroke_width");
     INTERN(s_width, "width"); INTERN(s_height, "height"); INTERN(s_color, "color");
@@ -180,7 +187,7 @@ typedef struct {
 } CCmd;
 
 typedef struct {
-    double base[7];        /* x, y, rotation, sx, sy, opacity, z */
+    double base[13];       /* x, y, rotation, sx, sy, opacity, z, affine[6] */
     double shape[12];      /* type-specific params */
     int shape_len;
     PyObject *colors[3];   /* strong refs to color objects */
@@ -1205,10 +1212,10 @@ static int identify_type(PyObject *node) {
 }
 
 /* ─────────────────────────────────────────────────────────────────────── */
-/* Read base attributes (x, y, rotation, sx, sy, opacity, z)               */
+/* Read base attributes and the optional local affine matrix.             */
 /* ─────────────────────────────────────────────────────────────────────── */
 
-static void read_base(PyObject *node, double base[7]) {
+static int read_base(PyObject *node, double base[13]) {
     base[0] = read_double(node, s_x);
     base[1] = read_double(node, s_y);
     base[2] = read_double(node, s_rotation);
@@ -1230,16 +1237,51 @@ static void read_base(PyObject *node, double base[7]) {
 
     base[5] = read_double(node, s_opacity);
     base[6] = read_double(node, s_z);
+    const double identity[6] = {1, 0, 0, 1, 0, 0};
+    memcpy(base + 7, identity, sizeof(identity));
+    PyObject *affine = PyObject_GetAttr(node, s__affine_transform);
+    if (!affine) return -1;
+    if (affine != Py_None) {
+        if (!PyTuple_Check(affine) || PyTuple_GET_SIZE(affine) != 6) {
+            Py_DECREF(affine);
+            PyErr_SetString(PyExc_TypeError, "affine_transform must contain six numbers");
+            return -1;
+        }
+        for (int i = 0; i < 6; i++) {
+            base[7 + i] = PyFloat_AsDouble(PyTuple_GET_ITEM(affine, i));
+            if (PyErr_Occurred()) { Py_DECREF(affine); return -1; }
+            if (!isfinite(base[7 + i])) {
+                Py_DECREF(affine);
+                PyErr_SetString(PyExc_ValueError, "affine_transform must be finite");
+                return -1;
+            }
+        }
+    }
+    Py_DECREF(affine);
+    return 0;
+}
+
+static void node_matrix(const double base[13], double out[6]) {
+    const double *affine = base + 7;
+    if (base[0] == 0 && base[1] == 0 && base[2] == 0 && base[3] == 1 && base[4] == 1) {
+        memcpy(out, affine, 6 * sizeof(double));
+        return;
+    }
+    double trs[6];
+    c_matrix(base[0], base[1], base[2], base[3], base[4], trs);
+    if (affine[0] == 1 && affine[1] == 0 && affine[2] == 0 && affine[3] == 1 && affine[4] == 0 && affine[5] == 0)
+        memcpy(out, trs, sizeof(trs));
+    else c_mul(trs, affine, out);
 }
 
 /* ─────────────────────────────────────────────────────────────────────── */
 /* Cache validation                                                        */
 /* ─────────────────────────────────────────────────────────────────────── */
 
-static int cache_valid(CNodeCache *c, const double base[7], const double shape[], int shape_len,
+static int cache_valid(CNodeCache *c, const double base[13], const double shape[], int shape_len,
                        const double ptf[6], double pop, double sscale) {
     if (!c->valid) return 0;
-    if (memcmp(base, c->base, 7 * sizeof(double)) != 0) return 0;
+    if (memcmp(base, c->base, 13 * sizeof(double)) != 0) return 0;
     if (shape_len > 0 && memcmp(shape, c->shape, shape_len * sizeof(double)) != 0) return 0;
     if (memcmp(ptf, c->parent_tf, 6 * sizeof(double)) != 0) return 0;
     if (pop != c->parent_op) return 0;
@@ -1247,10 +1289,10 @@ static int cache_valid(CNodeCache *c, const double base[7], const double shape[]
     return 1;
 }
 
-static void cache_store_context(CNodeCache *c, const double base[7], const double shape[], int shape_len,
+static void cache_store_context(CNodeCache *c, const double base[13], const double shape[], int shape_len,
                                 const double ptf[6], double pop, double sscale,
                                 const double world[6], double wop) {
-    memcpy(c->base, base, 7 * sizeof(double));
+    memcpy(c->base, base, 13 * sizeof(double));
     if (shape_len > 0) memcpy(c->shape, shape, shape_len * sizeof(double));
     c->shape_len = shape_len;
     memcpy(c->parent_tf, ptf, 6 * sizeof(double));
@@ -2243,8 +2285,8 @@ static void collect_recursive(PyObject *node, const double ptf[6], double pop,
     }
 
     /* Read base attributes */
-    double base[7];
-    read_base(node, base);
+    double base[13];
+    if (read_base(node, base) < 0) { state_take_render_error(st); return; }
 
     if (read_bool(node, s__stacking_context)) {
         PyObject *suffix = Py_BuildValue("((di))", base[6], ++st->order);
@@ -2266,7 +2308,7 @@ static void collect_recursive(PyObject *node, const double ptf[6], double pop,
     if (!clip) { state_take_render_error(st); return; }
     if (clip != Py_None) {
         double local[6], world[6];
-        c_matrix(base[0], base[1], base[2], base[3], base[4], local);
+        node_matrix(base, local);
         c_mul(ptf, local, world);
         PyObject *transform = Py_BuildValue("(dddddd)", world[0], world[1], world[2],
                                           world[3], world[4], world[5]);
@@ -2292,7 +2334,7 @@ static void collect_recursive(PyObject *node, const double ptf[6], double pop,
     /* Cache comparison: base + context */
     /* For shape params, we compare on cache miss side since they differ per type */
     int hit = cache->valid
-        && memcmp(base, cache->base, 7 * sizeof(double)) == 0
+        && memcmp(base, cache->base, 13 * sizeof(double)) == 0
         && memcmp(ptf, cache->parent_tf, 6 * sizeof(double)) == 0
         && pop == cache->parent_op
         && st->screen_scale == cache->screen_scale;
@@ -2529,7 +2571,7 @@ static void collect_recursive(PyObject *node, const double ptf[6], double pop,
     } else {
         /* CACHE MISS: compute world transform and emit */
         double local[6], world[6];
-        c_matrix(base[0], base[1], base[2], base[3], base[4], local);
+        node_matrix(base, local);
         c_mul(ptf, local, world);
         double wop = pop * base[5]; /* opacity */
 
@@ -3135,6 +3177,34 @@ static PyObject *accel_collect(PyObject *self, PyObject *args) {
 /* ─────────────────────────────────────────────────────────────────────── */
 /* Python-exposed math functions (for Layer._rebuild etc.)                  */
 /* ─────────────────────────────────────────────────────────────────────── */
+
+static PyObject *py_affine(PyObject *, PyObject *value) {
+    // Numeric conversion can call Python and mutate the input. Keep an
+    // immutable snapshot, including strong references to every coefficient.
+    PyObject *sequence = PySequence_Tuple(value);
+    if (!sequence) return NULL;
+    if (PyTuple_GET_SIZE(sequence) != 6) {
+        Py_DECREF(sequence);
+        PyErr_SetString(PyExc_ValueError, "affine_transform must contain six numbers");
+        return NULL;
+    }
+    double values[6];
+    bool reusable = true;
+    for (int i = 0; i < 6; i++) {
+        PyObject *item = PyTuple_GET_ITEM(sequence, i);
+        reusable = reusable && PyFloat_CheckExact(item);
+        values[i] = PyFloat_AsDouble(item);
+        if (PyErr_Occurred()) { Py_DECREF(sequence); return NULL; }
+        if (!isfinite(values[i])) {
+            Py_DECREF(sequence);
+            PyErr_SetString(PyExc_ValueError, "affine_transform must be finite");
+            return NULL;
+        }
+    }
+    if (reusable) return sequence;
+    Py_DECREF(sequence);
+    return Py_BuildValue("(dddddd)", values[0], values[1], values[2], values[3], values[4], values[5]);
+}
 
 /* matrix(pos_tuple, rot, scale) — matches Python _matrix(pos, rot, scale) */
 static PyObject *py_matrix(PyObject *self, PyObject *args) {
@@ -4371,11 +4441,184 @@ static PyObject *py_offset_meshes(PyObject *self, PyObject *args) {
 }
 
 /* ─────────────────────────────────────────────────────────────────────── */
+/* Node ticking                                                            */
+/* ─────────────────────────────────────────────────────────────────────── */
+
+static PyObject *default_tick, *default_action_tick, *default_sprite_tick;
+
+/* Hold the GIL throughout traversal. Actions and custom hooks still execute
+   in Python; only dispatch, time scaling and child snapshots move here. */
+struct TickRef {
+    PyObject *value;
+    explicit TickRef(PyObject *object) : value(object) {}
+    ~TickRef() { Py_XDECREF(value); }
+    TickRef(const TickRef &) = delete;
+    TickRef &operator=(const TickRef &) = delete;
+};
+
+static bool bound_to(PyObject *method, PyObject *function, PyObject *node) {
+    return PyMethod_Check(method) && PyMethod_GET_FUNCTION(method) == function
+        && PyMethod_GET_SELF(method) == node;
+}
+
+static int tick_node(PyObject *node, PyObject *dt);
+
+static int tick_node_body(PyObject *node, PyObject *dt) {
+    TickRef speed(PyObject_GetAttr(node, s_speed));
+    if (!speed.value) return -1;
+    TickRef local_dt(PyNumber_Multiply(dt, speed.value));
+    if (!local_dt.value) return -1;
+    TickRef callback(PyObject_GetAttr(node, s__tick_self));
+    if (!callback.value) return -1;
+
+    bool idle = false;
+    bool actions_only = bound_to(callback.value, default_action_tick, node);
+    bool sprite = bound_to(callback.value, default_sprite_tick, node);
+    if (actions_only || sprite) {
+        TickRef actions(PyObject_GetAttr(node, s__actions));
+        if (!actions.value) return -1;
+        idle = PyList_CheckExact(actions.value) && PyList_GET_SIZE(actions.value) == 0;
+        if (idle && sprite) {
+            TickRef frames(PyObject_GetAttr(node, s__anim_frames));
+            if (!frames.value) return -1;
+            idle = frames.value == Py_None
+                || (PyList_CheckExact(frames.value) && PyList_GET_SIZE(frames.value) == 0);
+        }
+    }
+    if (!idle) {
+        TickRef result(PyObject_CallOneArg(callback.value, local_dt.value));
+        if (!result.value) return -1;
+    }
+
+    // Snapshot after the node's own callback, just as Node._tick did.
+    TickRef children(PyObject_GetAttr(node, s_children));
+    if (!children.value) return -1;
+    int nonempty = PyObject_IsTrue(children.value);
+    if (nonempty < 0) return -1;
+    if (!nonempty) return 0;
+    TickRef snapshot(PySequence_List(children.value));
+    if (!snapshot.value) return -1;
+    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(snapshot.value); ++i) {
+        PyObject *child = PyList_GET_ITEM(snapshot.value, i);
+        TickRef method(PyObject_GetAttr(child, s__tick));
+        if (!method.value) return -1;
+        if (bound_to(method.value, default_tick, child)) {
+            if (tick_node(child, local_dt.value) < 0) return -1;
+        } else {
+            TickRef result(PyObject_CallOneArg(method.value, local_dt.value));
+            if (!result.value) return -1;
+        }
+    }
+    return 0;
+}
+
+static int tick_node(PyObject *node, PyObject *dt) {
+    if (Py_EnterRecursiveCall(" while updating scene nodes")) return -1;
+    int result = tick_node_body(node, dt);
+    Py_LeaveRecursiveCall();
+    return result;
+}
+
+static PyObject *configure_ticks(PyObject *, PyObject *args) {
+    PyObject *tick, *actions, *sprite;
+    if (!PyArg_ParseTuple(args, "OOO", &tick, &actions, &sprite)) return NULL;
+    if (!PyCallable_Check(tick) || !PyCallable_Check(actions) || !PyCallable_Check(sprite)) {
+        PyErr_SetString(PyExc_TypeError, "tick handlers must be callable");
+        return NULL;
+    }
+    Py_XSETREF(default_tick, Py_NewRef(tick));
+    Py_XSETREF(default_action_tick, Py_NewRef(actions));
+    Py_XSETREF(default_sprite_tick, Py_NewRef(sprite));
+    Py_RETURN_NONE;
+}
+
+static PyObject *accel_tick(PyObject *, PyObject *args) {
+    PyObject *node, *dt;
+    if (!PyArg_ParseTuple(args, "OO", &node, &dt)) return NULL;
+    if (!default_tick) {
+        PyErr_SetString(PyExc_RuntimeError, "scene tick handlers are not configured");
+        return NULL;
+    }
+    if (tick_node(node, dt) < 0) return NULL;
+    Py_RETURN_NONE;
+}
+
+/* UI registries use postorder traversal, including hidden nodes. Keep the
+   original child snapshot and Python descriptor behavior while avoiding a
+   Python call and four attribute checks in a Python frame for every node. */
+static int collect_ui_node(PyObject *node, PyObject *root, PyObject *input_type, PyObject *lists);
+
+static int collect_ui_body(PyObject *node, PyObject *root, PyObject *input_type, PyObject *lists) {
+    TickRef children(PyObject_GetAttr(node, s_children));
+    if (!children.value) return -1;
+    TickRef snapshot(PySequence_List(children.value));
+    if (!snapshot.value) return -1;
+    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(snapshot.value); ++i) {
+        if (collect_ui_node(PyList_GET_ITEM(snapshot.value, i), root, input_type, lists) < 0) return -1;
+    }
+    if (node == root) return 0;
+    for (int index = 0; index < 2; ++index) {
+        PyObject *attribute = NULL;
+        int found = PyObject_GetOptionalAttr(node, index == 0 ? s__layout : s__dispatch_ui_events, &attribute);
+        if (found < 0) return -1;
+        TickRef hook(attribute);
+        if (found && hook.value != Py_None && PyList_Append(PyTuple_GET_ITEM(lists, index), node) < 0) return -1;
+    }
+    int is_input = PyObject_IsInstance(node, input_type);
+    if (is_input < 0) return -1;
+    if (is_input && PyList_Append(PyTuple_GET_ITEM(lists, 2), node) < 0) return -1;
+    // Repeat isinstance as in the Python walk: __class__ can be a descriptor.
+    int focusable = PyObject_IsInstance(node, input_type);
+    if (focusable < 0) return -1;
+    if (!focusable) {
+        PyObject *attribute = NULL;
+        int found = PyObject_GetOptionalAttr(node, s__is_control, &attribute);
+        if (found < 0) return -1;
+        TickRef control(attribute);
+        if (found) {
+            focusable = PyObject_IsTrue(control.value);
+            if (focusable < 0) return -1;
+        }
+    }
+    if (focusable && PyList_Append(PyTuple_GET_ITEM(lists, 3), node) < 0) return -1;
+    return 0;
+}
+
+static int collect_ui_node(PyObject *node, PyObject *root, PyObject *input_type, PyObject *lists) {
+    if (Py_EnterRecursiveCall(" while collecting scene UI nodes")) return -1;
+    int result = collect_ui_body(node, root, input_type, lists);
+    Py_LeaveRecursiveCall();
+    return result;
+}
+
+static PyObject *accel_ui_nodes(PyObject *, PyObject *args) {
+    PyObject *root, *input_type;
+    if (!PyArg_ParseTuple(args, "OO", &root, &input_type)) return NULL;
+    if (!PyType_Check(input_type)) {
+        PyErr_SetString(PyExc_TypeError, "input_type must be a type");
+        return NULL;
+    }
+    TickRef lists(PyTuple_New(4));
+    if (!lists.value) return NULL;
+    for (int i = 0; i < 4; ++i) {
+        PyObject *list = PyList_New(0);
+        if (!list) return NULL;
+        PyTuple_SET_ITEM(lists.value, i, list);
+    }
+    if (collect_ui_node(root, root, input_type, lists.value) < 0) return NULL;
+    return Py_NewRef(lists.value);
+}
+
+/* ─────────────────────────────────────────────────────────────────────── */
 /* Module definition                                                       */
 /* ─────────────────────────────────────────────────────────────────────── */
 
 static PyMethodDef methods[] = {
+    {"_configure_ticks", configure_ticks, METH_VARARGS, "Register the built-in Python tick handlers."},
+    {"tick", accel_tick, METH_VARARGS, "Update a node subtree, preserving Python callbacks and child snapshots."},
+    {"ui_nodes", accel_ui_nodes, METH_VARARGS, "Collect layout, event, input and focus nodes in postorder."},
     {"collect", accel_collect, METH_VARARGS, "Collect scene graph and return packed GPU data."},
+    {"affine", py_affine, METH_O, "Validate and normalize six finite affine matrix coefficients."},
     {"matrix",    py_matrix,    METH_VARARGS, "Compute 2D affine matrix."},
     {"mul",       py_mul,       METH_VARARGS, "Multiply two 2D affine matrices."},
     {"apply",     py_apply,     METH_VARARGS, "Apply 2D affine matrix to a point."},

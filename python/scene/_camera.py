@@ -102,7 +102,7 @@ class Camera:
             n = n.parent
         m = _IDENTITY
         for n in reversed(chain):
-            m = _mul(m, _matrix((n.x, n.y), n.rotation, n.scale))
+            m = _mul(m, n._local_matrix())
         return (m[4], m[5])
 
     def _transform(self, scene_w, scene_h):

@@ -364,8 +364,10 @@ class PathRenderQualityTests(unittest.TestCase):
             image = layer.capture(rect=(0, 0, 20000, 100), size=(200, 1))
         self.assertEqual(image.size, (200, 1))
         self.assertEqual(image.rgba[400:404], b"\xff\xff\xff\xff")
-        self.assertLessEqual(max(width for width, _ in allocations), 201)
-        self.assertLessEqual(max(height for _, height in allocations), 2)
+        # An aligned cache may add one pixel on either side of the thumbnail;
+        # it must still avoid allocating the full 20,000-unit path.
+        self.assertLessEqual(max(width for width, _ in allocations), image.width + 2)
+        self.assertLessEqual(max(height for _, height in allocations), image.height + 2)
 
     def test_texture_cache_tracks_actual_downsampling_scale(self):
         path = Path(QUADRATIC, fill="#ffffff", stroke=None)

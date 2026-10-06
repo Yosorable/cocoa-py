@@ -31,7 +31,7 @@ static PyObject *audio_set_semitones(PyObject *, PyObject *args) {
     }
     std::lock_guard<std::mutex> lock(gMutex);
     auto ch = channelRecord(handle);
-    if (ch && !ch->completed) { ch->semitones = value; ch->timePitch.pitch = value * 100; }
+    if (ch && !ch->completed) { ch->semitones = value; if (ch->timePitch) applyChannelPitch(ch); }
     Py_RETURN_NONE;
 }
 
