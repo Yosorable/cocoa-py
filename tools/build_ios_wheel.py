@@ -3,6 +3,7 @@
 Run with CPython 3.14 on macOS and a full Xcode installation. The build frontend
 creates an isolated environment for setuptools and NumPy. It does not launch
 Simulator, sign an application, or upload the resulting wheel.
+Use --no-isolation to reuse an environment that already has the build tools.
 """
 
 import argparse
@@ -37,6 +38,8 @@ def main():
                         help="Path to the matching CPython 3.14 Python.framework")
     parser.add_argument("--target", choices=("iphoneos", "iphonesimulator"), default="iphoneos")
     parser.add_argument("--outdir", type=Path, default=Path("dist"))
+    parser.add_argument("--no-isolation", action="store_true",
+                        help="Use installed build dependencies without downloading them")
     args = parser.parse_args()
     try:
         framework = validate_python_framework(args.python_framework, args.target)
@@ -45,9 +48,12 @@ def main():
     environment = os.environ.copy()
     environment["COCOA_PY_IOS_FRAMEWORK"] = str(framework)
     environment["COCOA_PY_IOS_TARGET"] = args.target
-    subprocess.run([
+    command = [
         sys.executable, "-m", "build", "--wheel", "--outdir", str(args.outdir.resolve()),
-    ], cwd=Path(__file__).resolve().parents[1], env=environment, check=True)
+    ]
+    if args.no_isolation:
+        command.append("--no-isolation")
+    subprocess.run(command, cwd=Path(__file__).resolve().parents[1], env=environment, check=True)
 
 
 if __name__ == "__main__":

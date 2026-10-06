@@ -107,8 +107,11 @@ class AppleBuildExt(build_ext):
             resources = output / "scene" / "_resources"
             resources.mkdir(parents=True, exist_ok=True)
             intermediate = Path(self.build_temp) / "SceneShaders.air"
+            module_cache = Path(self.build_temp).resolve() / "metal-module-cache"
+            module_cache.mkdir(parents=True, exist_ok=True)
             subprocess.run([
                 "xcrun", "--sdk", ios_target, "metal", "-c", "-target", "air64-apple-ios17.0" + target_suffix,
+                "-fmodules-cache-path=" + str(module_cache),
                 "python/scene/_resources/SceneShaders.metal", "-o", str(intermediate),
             ], check=True)
             subprocess.run([
