@@ -30,6 +30,16 @@ _rot = _scene_accel.rot
 _feather = _scene_accel.feather
 _invert = _scene_accel.invert
 
+def _max_scale(world):
+    """Largest singular value of the affine transform's linear part."""
+    a, b, c, d = world[:4]
+    peak = max(abs(a), abs(b), abs(c), abs(d))
+    if not peak or not math.isfinite(peak):
+        return peak
+    a, b, c, d = a / peak, b / peak, c / peak, d / peak
+    return peak * (0.5 * math.hypot(a + d, b - c) +
+                   0.5 * math.hypot(a - d, b + c))
+
 def _color(v):
     return tuple(float(c) for c in normalize_color(v))
 

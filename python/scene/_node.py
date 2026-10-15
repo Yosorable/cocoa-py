@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import math
+import struct
 
 from _cocoa import _scene_accel
 
 from ._common import (
-    _IDENTITY, _apply, _avg_scale, _color, _identity, _invert, _matrix, _mul, _rot,
+    _IDENTITY, _apply, _avg_scale, _color, _identity, _invert, _matrix, _max_scale, _mul, _rot,
 )
 from ._engine import Cmd, KIND_TEX, Texture
 
@@ -306,9 +307,6 @@ class Node:
             clips = node._clip_state(world, clips)
             if node is self:
                 return world, opacity, visible, clips
-            if isinstance(node, Layer) and node._lcenter is not None:
-                anchor = node._cache_anchor if node._cache_anchor is not None else node._lcenter
-                world = node._draw_transform(world, anchor)
 
     # ── hit testing ──
 
@@ -496,9 +494,6 @@ class Layer(Node):
         self._tex: Texture | None = None
         self._lsize = None
         self._lcenter = None
-        self._capture_center = None
-        self._cache_anchor = None
-        self._clip_basis = None
         self._rscale = 1.0
         self._dirty = True
         self._hit_snapshot = []
@@ -519,37 +514,9 @@ class Layer(Node):
     def invalidate(self):
         self._dirty = True
 
-    @staticmethod
-    def _draw_transform(world, anchor):
-        # Match the existing cached quad, whose extent uses average scale.
-        return _mul(_matrix(_apply(world, anchor), _rot(world), _avg_scale(world)),
-                    _matrix((-anchor[0], -anchor[1]), 0, 1))
-
-    def _current_clip_basis(self):
-        if self.clip is None:
-            return None
-        world = self._world_transform
-        scale = _avg_scale(world)
-        if scale == 0:
-            return (0., 0., 0., 0.)
-        normalized = tuple(value / scale for value in world[:4])
-        return _mul(_matrix((0, 0), -_rot(world), 1), (*normalized, 0, 0))[:4]
-
     def _prepare_cache(self, renderer, rscale):
-        basis = self._current_clip_basis()
-        changed = ((basis is None) != (self._clip_basis is None) or
-                   (basis is not None and self._clip_basis is not None and
-                    any(not math.isclose(a, b, rel_tol=1e-12, abs_tol=1e-12)
-                        for a, b in zip(basis, self._clip_basis))))
-        if self._tex is None or self._dirty or abs(rscale - self._rscale) > 1e-3 or changed:
+        if self._tex is None or self._dirty or abs(rscale - self._rscale) > 1e-3:
             self._rebuild(renderer, rscale)
-
-    def _texture_center(self, world=None):
-        if self._capture_center is not None:
-            return self._capture_center
-        world = self._world_transform if world is None else world
-        transform = self._draw_transform(world, self._cache_anchor) if self._cache_anchor is not None else world
-        return _apply(transform, self._lcenter)
 
     def _collect_unclipped(self, cmds, renderer, transform, opacity, order):
         if not self.visible or opacity <= 0.001:
@@ -559,20 +526,26 @@ class Layer(Node):
         self._world_transform = world
         self._world_opacity = op
         self._record_interaction(renderer, world, op, order[0])
-        if self.children:
-            ds = _avg_scale(world)
-            rs = max(ds, 1.0)
+        if self.children and world[0] * world[3] != world[1] * world[2]:
+            rs = max(_max_scale(world), 1.0)
             self._prepare_cache(renderer, rs)
             if self._tex and self._lsize and self._lcenter:
-                center = self._texture_center(world)
+                center = _apply(world, self._lcenter)
+                hw, hh = self._lsize[0] * .5, self._lsize[1] * .5
+                x0, y0 = self._lcenter[0] - hw, self._lcenter[1] - hh
+                x1, y1 = self._lcenter[0] + hw, self._lcenter[1] + hh
+                corners = ((x0, y0, 0, 0), (x1, y0, 1, 0), (x0, y1, 0, 1),
+                           (x1, y0, 1, 0), (x1, y1, 1, 1), (x0, y1, 0, 1))
+                vertices = [value for x, y, u, v in corners for value in (*_apply(world, (x, y)), u, v)]
                 order[0] += 1
                 cmds.append(Cmd(
                     self.z, order[0], KIND_TEX,
                     center[0], center[1],
-                    self._lsize[0] * ds * 0.5, self._lsize[1] * ds * 0.5,
+                    hw * math.hypot(world[0], world[1]), hh * math.hypot(world[2], world[3]),
                     _rot(world),
                     (KIND_TEX, 0, 0, 0), (0, 0, op, 0),
                     (0, 0, 0, 0), (1, 1, 1, 1), self._tex,
+                    _vb=struct.pack('<24f', *vertices),
                 ))
                 records = getattr(renderer, "_collect_interactions", None)
                 if records is not None:
@@ -585,12 +558,10 @@ class Layer(Node):
         """Project the cached drawing's interaction geometry with its quad."""
         if self._tex is None or self._lsize is None or opacity <= .001:
             return []
-        scale = _avg_scale(world)
-        if scale <= 1e-12:
+        if world[0] * world[3] == world[1] * world[2]:
             return []
-        center = self._texture_center(world)
-        placement = _mul(_matrix(center, _rot(world), scale),
-                         _matrix((-self._lsize[0] / 2, -self._lsize[1] / 2), 0, 1))
+        origin = (self._lcenter[0] - self._lsize[0] / 2, self._lcenter[1] - self._lsize[1] / 2)
+        placement = _mul(world, _matrix(origin, 0, 1))
         inverse = _invert(placement)
         result = []
         for node, local, local_opacity, local_clips, key, has_bounds in self._hit_snapshot:
@@ -612,9 +583,6 @@ class Layer(Node):
         return result
 
     def _rebuild(self, renderer, rscale):
-        self._capture_center = None
-        self._cache_anchor = None
-        self._clip_basis = self._current_clip_basis()
         bounds = _measure_children(self.children)
         if self.clip is not None and (self.clip.width == 0 or self.clip.height == 0):
             bounds = None
@@ -629,27 +597,12 @@ class Layer(Node):
         pad = 6.0
         x0, y0, x1, y1 = x0 - pad, y0 - pad, x1 + pad, y1 + pad
         capture_viewport = renderer._capture_viewport
-        draw_transform = None
         if self.clip is not None:
-            from ._capture import _inverse
-
-            world = self._world_transform
-            if _avg_scale(world) == 0:
-                x1 = x0
-            else:
-                anchor = ((x0 + x1) * .5, (y0 + y1) * .5)
-                draw_transform = self._draw_transform(world, anchor)
-                # The clip follows the full affine transform. Project it back
-                # into the cached quad's coordinates before cropping its raster.
-                mapped = _mul(_inverse(draw_transform), world)
-                clip = self.clip
-                corners = [_apply(mapped, (x, y)) for x in (clip.x, clip.x + clip.width)
-                           for y in (clip.y, clip.y + clip.height)]
-                x0 = max(x0, min(p[0] for p in corners) - pad)
-                y0 = max(y0, min(p[1] for p in corners) - pad)
-                x1 = min(x1, max(p[0] for p in corners) + pad)
-                y1 = min(y1, max(p[1] for p in corners) + pad)
-                self._cache_anchor = anchor
+            # Both the raster and its clip are in this layer's local space.
+            clip = self.clip
+            x0, y0 = max(x0, clip.x - pad), max(y0, clip.y - pad)
+            x1 = min(x1, clip.x + clip.width + pad)
+            y1 = min(y1, clip.y + clip.height + pad)
             if x1 <= x0 or y1 <= y0:
                 if self._tex:
                     self._tex.close(); self._tex = None
@@ -664,22 +617,13 @@ class Layer(Node):
             # at high magnification must not allocate its whole enlarged image.
             cw, ch = capture_viewport
             world = self._world_transform
-            draw_scale = _avg_scale(world)
-            if draw_scale == 0:
-                x1 = x0
-            else:
-                # Match the existing Layer quad: its center uses the full
-                # affine transform, while its extent uses average scale.
-                if draw_transform is None:
-                    anchor = ((x0 + x1) * 0.5, (y0 + y1) * 0.5)
-                    draw_transform = self._draw_transform(world, anchor)
-                inverse = _inverse(draw_transform)
-                corners = [_apply(inverse, point) for point in ((0, 0), (cw, 0), (0, ch), (cw, ch))]
-                margin = 2 / (renderer.screen_scale * rscale)
-                x0 = max(x0, min(point[0] for point in corners) - margin)
-                y0 = max(y0, min(point[1] for point in corners) - margin)
-                x1 = min(x1, max(point[0] for point in corners) + margin)
-                y1 = min(y1, max(point[1] for point in corners) + margin)
+            inverse = _inverse(world)
+            corners = [_apply(inverse, point) for point in ((0, 0), (cw, 0), (0, ch), (cw, ch))]
+            margin = 2 / (renderer.screen_scale * rscale)
+            x0 = max(x0, min(point[0] for point in corners) - margin)
+            y0 = max(y0, min(point[1] for point in corners) - margin)
+            x1 = min(x1, max(point[0] for point in corners) + margin)
+            y1 = min(y1, max(point[1] for point in corners) + margin)
             if x1 <= x0 or y1 <= y0:
                 if self._tex:
                     self._tex.close()
@@ -726,8 +670,6 @@ class Layer(Node):
             renderer._collect_interactions = previous_interactions
             renderer._capture_viewport = capture_viewport
         self._lcenter = ((x0 + x1) * 0.5, (y0 + y1) * 0.5)
-        if capture_viewport is not None and draw_transform is not None:
-            self._capture_center = _apply(draw_transform, self._lcenter)
         self._lsize = (lw, lh)
         self._rscale = rscale
         self._dirty = False
@@ -739,8 +681,6 @@ class Layer(Node):
             self._tex.close(); self._tex = None
         self._lsize = None
         self._lcenter = None
-        self._capture_center = None
-        self._cache_anchor = self._clip_basis = None
         super().close()
 
 

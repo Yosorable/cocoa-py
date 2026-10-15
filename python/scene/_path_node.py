@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 
 from _cocoa import _scene_accel
-from ._common import _apply, _color, _rot
+from ._common import _apply, _color, _max_scale, _rot
 from ._engine import Cmd, KIND_TEX, Texture
 from ._enums import FillRule
 from ._node import Node
@@ -16,17 +16,6 @@ from ._path import (
 
 # Split the screen-space error budget between the centerline and round strokes.
 _CURVE_PIXEL_TOLERANCE = 0.125
-
-
-def _max_scale(world):
-    """Largest singular value of the affine transform's linear part."""
-    a, b, c, d = world[:4]
-    peak = max(abs(a), abs(b), abs(c), abs(d))
-    if not peak or not math.isfinite(peak):
-        return peak
-    a, b, c, d = a / peak, b / peak, c / peak, d / peak
-    return peak * (0.5 * math.hypot(a + d, b - c) +
-                   0.5 * math.hypot(a - d, b + c))
 
 
 def _usable_scale(cached, required):

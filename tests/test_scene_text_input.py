@@ -216,7 +216,7 @@ class TextInputNativeTests(unittest.TestCase):
         self.assertEqual(field.marked_range, marked)
         self.assertEqual(view.height, 180)
 
-    def test_cropped_layer_native_editor_keeps_the_cached_quad_anchor(self):
+    def test_cropped_layer_native_editor_preserves_the_full_transform(self):
         layer = Layer(x=20, y=50, scale=(2, 1), clip=(20, -15, 30, 30))
         field = TextField(40, 20, x=40, text="A", z=1)
         self.scene.ui.add(layer.add(Rect(200, 100), field))
@@ -224,7 +224,7 @@ class TextInputNativeTests(unittest.TestCase):
         field.focus()
         self.scene._render()
         state = self.native(field)
-        self.assertEqual(field.world_position, (80., 50.))
+        self.assertEqual(field.world_position, (100., 50.))
         self.assertAlmostEqual(state["center"][0], field.world_position[0])
         self.assertAlmostEqual(state["center"][1], field.world_position[1])
 

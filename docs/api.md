@@ -67,6 +67,9 @@ As with other content changes inside a `Layer`, call `layer.invalidate()` after
 changing a child's transform.
 Layer caches align their raster bounds to local pixels, so equivalent transform
 chains do not shift the sampling grid when their enclosing bounds differ.
+The cached texture retains nonuniform scale, shear and reflection when drawn;
+its clipping and hit testing use that same transform. Changing the layer's own
+transform does not require invalidation.
 
 `SpriteBatch` stores many explicitly updated images in one scene node. Append
 a `Texture` or `SpriteFrame` with `batch.add_sprite(source, ...)`, which returns

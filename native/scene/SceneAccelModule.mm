@@ -88,7 +88,6 @@ static PyObject *s_interactive, *s__bounds, *s__rendered_size;
 static PyObject *s__emit, *s__snap, *s_kind, *s_cx, *s_cy, *s_hw, *s_hh, *s_rot;
 static PyObject *s_params, *s_style, *s_extra;
 static PyObject *s__tex, *s__lsize, *s__lcenter, *s__dirty, *s__shader_size;
-static PyObject *s__texture_center;
 static PyObject *s__path_size, *s__path_center, *s__path_version, *s__ensure_texture, *s__raster_dirty, *s__get_meshes;
 static PyObject *s__cached_mesh_scale;
 static PyObject *s__prepare_cache, *s_text_texture;
@@ -133,7 +132,6 @@ static int intern_strings(void) {
     INTERN(s__cached_mesh_scale, "_cached_mesh_scale");
     INTERN(s__raster_dirty, "_raster_dirty");
     INTERN(s__lsize, "_lsize"); INTERN(s__lcenter, "_lcenter");
-    INTERN(s__texture_center, "_texture_center");
     INTERN(s__dirty, "_dirty"); INTERN(s__prepare_cache, "_prepare_cache");
     INTERN(s_text_texture, "text_texture"); INTERN(s_parent, "parent");
     INTERN(s_sprite_size, "sprite_size"); INTERN(s_anchor, "anchor");
@@ -2156,12 +2154,15 @@ static void handle_layer(PyObject *node, CNodeCache *cache, CollectState *st,
     PyObject *children = PyObject_GetAttr(node, s_children);
     Py_ssize_t n = children ? PyList_Size(children) : 0;
     Py_XDECREF(children);
-    if (n <= 0) {
+    if (n <= 0 || world[0] * world[3] == world[1] * world[2]) {
+        for (int i = 0; i < cache->cmd_count; i++) {
+            Py_CLEAR(cache->cmds[i].texture);
+        }
         cache->cmd_count = 0;
         return;
     }
 
-    double ds = c_avg_scale(world);
+    double ds = c_max_scale(world);
     double rs = ds > 1.0 ? ds : 1.0;
 
     /* Share clip-aware raster invalidation with Python collection. */
@@ -2185,23 +2186,34 @@ static void handle_layer(PyObject *node, CNodeCache *cache, CollectState *st,
     if (tex && tex != Py_None && lsize && lsize != Py_None && lcenter && lcenter != Py_None) {
         double lw = PyFloat_AsDouble(PyTuple_GET_ITEM(lsize, 0));
         double lh = PyFloat_AsDouble(PyTuple_GET_ITEM(lsize, 1));
-        double wcx, wcy;
-        PyObject *center = PyObject_CallMethodObjArgs(node, s__texture_center, NULL);
-        if (center) PyArg_ParseTuple(center, "dd", &wcx, &wcy);
-        Py_XDECREF(center);
+        double cx = PyFloat_AsDouble(PyTuple_GET_ITEM(lcenter, 0));
+        double cy = PyFloat_AsDouble(PyTuple_GET_ITEM(lcenter, 1));
         if (state_take_render_error(st)) {
             cache->valid = 0;
             Py_XDECREF(tex); Py_XDECREF(lsize); Py_XDECREF(lcenter);
             return;
         }
-        float rot = (float)c_rot(world);
-
         CCmd *cmd = &cache->cmds[0];
         st->order++;
         cmd->z = cache->base[6];
         cmd->order = st->order;
         cmd->kind = KIND_TEX;
-        pack_verts((float)wcx, (float)wcy, (float)(lw * ds * 0.5), (float)(lh * ds * 0.5), rot, cmd->vb);
+        double x0 = cx - lw * .5, y0 = cy - lh * .5;
+        double x1 = cx + lw * .5, y1 = cy + lh * .5;
+        const double corners[6][4] = {
+            {x0, y0, 0, 0}, {x1, y0, 1, 0}, {x0, y1, 0, 1},
+            {x1, y0, 1, 0}, {x1, y1, 1, 1}, {x0, y1, 0, 1}
+        };
+        float vertices[24];
+        for (int i = 0; i < 6; i++) {
+            double x, y;
+            c_apply(world, corners[i][0], corners[i][1], &x, &y);
+            vertices[4*i] = (float)x;
+            vertices[4*i+1] = (float)y;
+            vertices[4*i+2] = (float)corners[i][2];
+            vertices[4*i+3] = (float)corners[i][3];
+        }
+        memcpy(cmd->vb, vertices, sizeof(vertices));
         float p[4] = {(float)KIND_TEX, 0, 0, 0};
         float sty_[4] = {0, 0, (float)op, 0};
         float fill_[4] = {0, 0, 0, 0};

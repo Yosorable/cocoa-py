@@ -363,26 +363,26 @@ class ClipRenderingTests(unittest.TestCase):
 
     def test_cropping_layer_preserves_content_placement_under_nonuniform_transforms(self):
         layer = Layer(x=20, y=50, scale=(2, 1))
-        # The off-center crop must not change the anchor of the existing quad.
+        # Cropping must preserve the full inherited transform of the content.
         layer.add(Rect(200, 100, fill="#0000ff"), Rect(6, 10, x=40, fill="#ff0000", z=1))
         self.scene.add(layer)
         before = self.capture()
-        self.assertEqual(pixel(before, 80, 50), (255, 0, 0, 255))
+        self.assertEqual(pixel(before, 98, 50), (255, 0, 0, 255))
         layer.clip = (20, -15, 30, 30)
         self.scene._render()
-        snapshot = (layer._tex, layer._cache_anchor, layer._clip_basis)
+        snapshot = (layer._tex, layer._lcenter, layer._lsize)
         after = self.capture()
-        self.assertEqual(pixel(after, 80, 50), (255, 0, 0, 255))
-        self.assertEqual((layer._tex, layer._cache_anchor, layer._clip_basis), snapshot)
+        self.assertEqual(pixel(after, 98, 50), (255, 0, 0, 255))
+        self.assertEqual((layer._tex, layer._lcenter, layer._lsize), snapshot)
         layer.position = (10, 50)
         self.scene._render()
         self.assertIs(layer._tex, snapshot[0])
-        self.assertEqual(pixel(self.capture(), 70, 50), (255, 0, 0, 255))
-        # Same average scale, different shear/anisotropy: the crop must rebuild.
+        self.assertEqual(pixel(self.capture(), 90, 50), (255, 0, 0, 255))
+        # The local crop can be reused when the maximum scale stays the same.
         layer.scale = (1, 2)
         self.scene._render()
-        self.assertNotEqual(layer._clip_basis, snapshot[2])
-        self.assertEqual(pixel(self.capture(), 50, 50), (0, 0, 255, 255))
+        self.assertIs(layer._tex, snapshot[0])
+        self.assertEqual(pixel(self.capture(), 50, 50), (255, 0, 0, 255))
 
     def test_cropped_layer_control_uses_the_same_geometry_for_drawing_and_activation(self):
         layer = Layer(x=20, y=50, scale=(2, 1), clip=(20, -15, 30, 30))
@@ -391,7 +391,7 @@ class ClipRenderingTests(unittest.TestCase):
         self.scene.add(layer)
         self.scene._render()
         point = toggle.world_position
-        self.assertEqual(point, (80., 50.))
+        self.assertEqual(point, (100., 50.))
         current = toggle._current_geometry()[0]
         self.assertAlmostEqual(current[4], point[0])
         self.assertAlmostEqual(current[5], point[1])

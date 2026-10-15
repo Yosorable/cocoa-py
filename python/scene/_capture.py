@@ -145,7 +145,7 @@ def capture(node, *, rect=None, size=None, background=None):
     states = [(child, child._world_transform, child._world_opacity,
                getattr(child, "_rendered_size", None), child._world_clips) for child in _walk(node)]
     layers = [(child, child._tex, child._lsize, child._lcenter, child._rscale,
-               child._dirty, child._capture_center, child._hit_snapshot, child._cache_anchor, child._clip_basis)
+               child._dirty, child._hit_snapshot)
               for child, *_ in states if isinstance(child, Layer)]
     path_texture_fields = ("_tex", "_path_size", "_path_center", "_rscale",
                            "_texture_version", "_texture_pixel_scale", "_texture_size")
@@ -169,7 +169,6 @@ def capture(node, *, rect=None, size=None, background=None):
         for layer, *_ in layers:
             layer._tex = None
             layer._dirty = True
-            layer._capture_center = None
         for path, _ in paths:
             path._tex = None
             path._texture_version = -1
@@ -218,14 +217,12 @@ def capture(node, *, rect=None, size=None, background=None):
                     current.close()
                 setattr(shader, name, previous)
             shader._renderer, shader._dirty = previous_renderer, dirty
-        for layer, old_texture, logical_size, center, render_scale, dirty, capture_center, hit_snapshot, cache_anchor, clip_basis in layers:
+        for layer, old_texture, logical_size, center, render_scale, dirty, hit_snapshot in layers:
             if layer._tex is not None and layer._tex is not old_texture:
                 layer._tex.close()
             layer._tex, layer._lsize, layer._lcenter = old_texture, logical_size, center
             layer._rscale, layer._dirty = render_scale, dirty
-            layer._capture_center = capture_center
             layer._hit_snapshot = hit_snapshot
-            layer._cache_anchor, layer._clip_basis = cache_anchor, clip_basis
         for path, previous in paths:
             if path._tex is not None and path._tex is not previous[0]:
                 path._tex.close()

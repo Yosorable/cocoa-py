@@ -82,8 +82,10 @@ class CaptureTransformTests(unittest.TestCase):
                         for got, want in zip(actual, expected):
                             self.assertAlmostEqual(got, want, delta=2, msg=(transform, x, y, expected, actual))
                         colored_samples += expected != BLACK
-                if transform != (0, 0):
+                if all(transform):
                     self.assertGreater(colored_samples, 5)
+                else:
+                    self.assertEqual(colored_samples, 0)
 
     def tilemap(self):
         texture = gpu.Texture.render_target(16, 16)
