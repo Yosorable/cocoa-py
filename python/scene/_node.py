@@ -597,6 +597,8 @@ class Layer(Node):
         pad = 6.0
         x0, y0, x1, y1 = x0 - pad, y0 - pad, x1 + pad, y1 + pad
         capture_viewport = renderer._capture_viewport
+        capture_pixel_scale = renderer._capture_pixel_scale
+        pixels_x = pixels_y = renderer.screen_scale * rscale
         if self.clip is not None:
             # Both the raster and its clip are in this layer's local space.
             clip = self.clip
@@ -611,7 +613,7 @@ class Layer(Node):
                 self._rscale, self._dirty = rscale, False
                 return
         if capture_viewport is not None:
-            from ._capture import _inverse
+            from ._capture import _inverse, _MAX_TEXTURE_SIZE, _MAX_CAPTURE_PIXELS
 
             # Rasterize only the visible part of a cached layer. A tiny crop
             # at high magnification must not allocate its whole enlarged image.
@@ -619,11 +621,19 @@ class Layer(Node):
             world = self._world_transform
             inverse = _inverse(world)
             corners = [_apply(inverse, point) for point in ((0, 0), (cw, 0), (0, ch), (cw, ch))]
-            margin = 2 / (renderer.screen_scale * rscale)
-            x0 = max(x0, min(point[0] for point in corners) - margin)
-            y0 = max(y0, min(point[1] for point in corners) - margin)
-            x1 = min(x1, max(point[0] for point in corners) + margin)
-            y1 = min(y1, max(point[1] for point in corners) + margin)
+            # Measure each local axis in output pixels. A uniform maximum
+            # scale can vastly oversample the compressed axis of a layer.
+            sx, sy = capture_pixel_scale
+            a, b, c, d = world[0] * sx, world[1] * sy, world[2] * sx, world[3] * sy
+            pixels_x, pixels_y = math.hypot(a, b), math.hypot(c, d)
+            # Under shear, column lengths alone can undersample a diagonal.
+            coverage = _max_scale((a / pixels_x, b / pixels_x, c / pixels_y, d / pixels_y))
+            pixels_x *= coverage
+            pixels_y *= coverage
+            x0 = max(x0, min(point[0] for point in corners) - 2 / pixels_x)
+            y0 = max(y0, min(point[1] for point in corners) - 2 / pixels_y)
+            x1 = min(x1, max(point[0] for point in corners) + 2 / pixels_x)
+            y1 = min(y1, max(point[1] for point in corners) + 2 / pixels_y)
             if x1 <= x0 or y1 <= y0:
                 if self._tex:
                     self._tex.close()
@@ -634,13 +644,19 @@ class Layer(Node):
         # Keep the cache on a stable local pixel grid. Fractional bounds must
         # not resample unchanged content when equivalent transform chains have
         # different enclosing boxes, or when a neighboring child moves.
-        pixels_per_unit = renderer.screen_scale * rscale
-        x0, y0 = math.floor(x0 * pixels_per_unit) / pixels_per_unit, math.floor(y0 * pixels_per_unit) / pixels_per_unit
-        x1, y1 = math.ceil(x1 * pixels_per_unit) / pixels_per_unit, math.ceil(y1 * pixels_per_unit) / pixels_per_unit
+        x0, y0 = math.floor(x0 * pixels_x) / pixels_x, math.floor(y0 * pixels_y) / pixels_y
+        x1, y1 = math.ceil(x1 * pixels_x) / pixels_x, math.ceil(y1 * pixels_y) / pixels_y
         lw = x1 - x0
         lh = y1 - y0
-        pw = max(1, int(round(lw * renderer.screen_scale * rscale)))
-        ph = max(1, int(round(lh * renderer.screen_scale * rscale)))
+        pw = max(1, int(round(lw * pixels_x)))
+        ph = max(1, int(round(lh * pixels_y)))
+        if capture_viewport is not None:
+            # Nearly parallel axes can still give a huge local bounding box.
+            # Bound temporary storage without altering the quad's geometry.
+            pw, ph = min(pw, _MAX_TEXTURE_SIZE), min(ph, _MAX_TEXTURE_SIZE)
+            if pw * ph > _MAX_CAPTURE_PIXELS:
+                reduction = math.sqrt(_MAX_CAPTURE_PIXELS / (pw * ph))
+                pw, ph = max(1, int(pw * reduction)), max(1, int(ph * reduction))
         if self._tex is None or self._lsize != (lw, lh) or abs(self._rscale - rscale) > 1e-3:
             if self._tex: self._tex.close()
             self._tex = Texture.render_target(pw, ph)
@@ -658,7 +674,10 @@ class Layer(Node):
             renderer._collect_interactions = interactions
             if capture_viewport is not None:
                 renderer._capture_viewport = (lw, lh)
-            renderer.screen_scale *= rscale
+                renderer._capture_pixel_scale = (pw / lw, ph / lh)
+                renderer.screen_scale = max(renderer._capture_pixel_scale)
+            else:
+                renderer.screen_scale *= rscale
             for child in self.children:
                 child._collect(sub, renderer, local_root, 1.0, order)
             sub.sort(key=lambda c: (c._render_layer or 0, (c._sort_scope or ()) + ((c.z, c.order),)))
@@ -669,6 +688,7 @@ class Layer(Node):
             renderer._collect_sort_scope = previous_scope
             renderer._collect_interactions = previous_interactions
             renderer._capture_viewport = capture_viewport
+            renderer._capture_pixel_scale = capture_pixel_scale
         self._lcenter = ((x0 + x1) * 0.5, (y0 + y1) * 0.5)
         self._lsize = (lw, lh)
         self._rscale = rscale

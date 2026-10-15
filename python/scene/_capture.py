@@ -11,6 +11,10 @@ from ._common import _IDENTITY, _matrix, _mul
 from .gpu import Texture, normalize_color
 
 
+_MAX_TEXTURE_SIZE = 16384
+_MAX_CAPTURE_PIXELS = 64 * 1024 * 1024
+
+
 def _rectangle(value):
     try:
         x, y, width, height = (float(v) for v in value)
@@ -28,7 +32,7 @@ def _pixel_size(value):
         raise ValueError("size must contain two integer pixel dimensions.") from error
     # Validate before Metal allocation; oversized descriptors can assert in
     # the driver. Bound capture memory independently of the window size.
-    if not (0 < width <= 16384 and 0 < height <= 16384) or width * height > 64 * 1024 * 1024:
+    if not (0 < width <= _MAX_TEXTURE_SIZE and 0 < height <= _MAX_TEXTURE_SIZE) or width * height > _MAX_CAPTURE_PIXELS:
         raise ValueError("Capture size must fit 16384 per axis and 64 megapixels.")
     return width, height
 
@@ -141,6 +145,7 @@ def capture(node, *, rect=None, size=None, background=None):
     old_pool, old_used = renderer._buf_pool, renderer._buf_used
     old_text, old_atlases = renderer._tc, renderer._ga
     old_viewport = renderer._capture_viewport
+    old_pixel_scale = renderer._capture_pixel_scale
     old_screen_transform = getattr(renderer, "_screen_transform", _IDENTITY)
     states = [(child, child._world_transform, child._world_opacity,
                getattr(child, "_rendered_size", None), child._world_clips) for child in _walk(node)]
@@ -160,6 +165,7 @@ def capture(node, *, rect=None, size=None, background=None):
     renderer._buf_pool, renderer._buf_used = [], []
     renderer._tc, renderer._ga = OrderedDict(), {}
     renderer._capture_viewport = (width, height)
+    renderer._capture_pixel_scale = (pixel_width / width, pixel_height / height)
     renderer._screen_transform = shift
     try:
         _metal.prepare_image_capture(window.handle)
@@ -241,6 +247,7 @@ def capture(node, *, rect=None, size=None, background=None):
             atlas.close()
         renderer._tc, renderer._ga = old_text, old_atlases
         renderer._capture_viewport = old_viewport
+        renderer._capture_pixel_scale = old_pixel_scale
         renderer._screen_transform = old_screen_transform
         renderer._buf_pool, renderer._buf_used = old_pool, old_used
         renderer._active_frame_slot = old_slot

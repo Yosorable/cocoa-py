@@ -365,6 +365,7 @@ class Renderer:
         self._sdf_base_size = 64  # base pixel size for SDF atlas
         self.screen_scale = window.scale
         self._capture_viewport = None
+        self._capture_pixel_scale = None
         self._clipped_pipelines = {}
         # Fallback pool for offscreen renders that happen outside a screen frame.
         self._buf_pool: list[tuple[int, Buffer]] = []   # (length, Buffer)

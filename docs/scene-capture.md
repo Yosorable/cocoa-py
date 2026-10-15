@@ -64,7 +64,11 @@ cannot be represented with finite values raises `ValueError`.
 The dimensions must be finite and positive. Output is limited to 16,384 pixels
 per axis and 67,108,864 total pixels before allocating Metal resources.
 Layers clip their temporary textures to the capture rectangle before rasterizing.
-Clipping preserves the existing Layer appearance for nonuniform transforms.
+They choose resolution separately for each local axis, including in nested Layers,
+so a compressed axis does not inherit the enlarged axis's pixel density. Extreme
+shear can still require a large local bounding box; temporary Layer textures then
+reduce raster resolution to fit the allocation limits below while preserving
+placement, clipping and the full affine transform.
 Tile maps use the capture rectangle for visibility, so a complete map can be
 exported even when its logical dimensions exceed the window.
 Intermediate render textures and glyph atlases are also checked before allocation:

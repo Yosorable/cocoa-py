@@ -2,8 +2,9 @@
 
 import os
 import unittest
+from unittest.mock import patch
 
-from scene import Group, Layer, Scene, Sprite, gpu
+from scene import Group, Layer, Rect, Scene, Sprite, gpu
 from scene._common import _IDENTITY, _apply, _mul
 
 
@@ -104,6 +105,98 @@ class LayerAffineTests(unittest.TestCase):
                     self.assertEqual(self.draw(python=python).rgba, bytes((0, 0, 0, 255)) * (240 * 200))
         layer.scale = (1, .25)
         self.assertEqual(pixel(self.draw(), 120, 100), (255, 0, 0, 255))
+
+    def test_anisotropic_capture_keeps_intermediates_proportional_to_output(self):
+        allocate = gpu.Texture.render_target
+        for nested in (False, True):
+            for rotation, reflection in ((0, 1), (45, 1), (90, -1)):
+                for size in ((200, 200), (300, 100)):
+                    with self.subTest(nested=nested, rotation=rotation, reflection=reflection, size=size):
+                        layer = Layer(x=10, y=10, rotation=rotation, scale=(20 * reflection, .1))
+                        content = Layer() if nested else Group()
+                        content.add(Rect(1000, 1000, fill="#ffffff"),
+                                    Sprite(self.texture, size=(.2, 40), x=.25, y=20))
+                        self.scene.add(layer.add(content))
+                        allocations = []
+
+                        def record(width, height, *args, **kwargs):
+                            allocations.append((width, height))
+                            self.assertLessEqual(max(width, height), 640,
+                                                 "A compressed axis was oversampled.")
+                            return allocate(width, height, *args, **kwargs)
+
+                        try:
+                            with patch.object(gpu.Texture, "render_target", side_effect=record):
+                                image = self.scene.capture(rect=(0, 0, 20, 20), size=size)
+                            self.assertEqual(image.size, size)
+                            self.assertEqual(len(allocations), 3 if nested else 2)
+                            for point, color in (((.25, 20), (255, 0, 0, 255)),
+                                                 ((-.25, -20), (255, 255, 255, 255))):
+                                x, y = _apply(layer._local_matrix(), point)
+                                self.assertEqual(pixel(image, int(x * size[0] / 20),
+                                                       int(y * size[1] / 20)), color)
+                        finally:
+                            self.scene.remove(layer)
+                            layer.close()
+
+    def test_anisotropic_capture_restores_live_caches_after_success_and_failure(self):
+        layer = Layer()
+        inner = Layer()
+        inner.add(Rect(10, 1000, fill="#ffffff"))
+        self.scene.add(layer.add(inner))
+        self.scene._render()
+        layer.scale = (20, .1)
+        renderer = self.scene._renderer
+        fields = ("_tex", "_lsize", "_lcenter", "_rscale", "_dirty", "_hit_snapshot")
+        before = [tuple(getattr(node, name) for name in fields) for node in (layer, inner)]
+        resources = gpu.resource_counts()
+        allocate = gpu.Texture.render_target
+        for fail in (False, True, False):
+            calls = 0
+
+            def record(width, height, *args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if fail and calls == 3:
+                    raise RuntimeError("injected nested allocation failure")
+                return allocate(width, height, *args, **kwargs)
+
+            with patch.object(gpu.Texture, "render_target", side_effect=record):
+                if fail:
+                    with self.assertRaisesRegex(RuntimeError, "nested allocation failure"):
+                        self.scene.capture(rect=(0, 0, 20, 20), size=(200, 200))
+                else:
+                    image = self.scene.capture(rect=(0, 0, 20, 20), size=(200, 200))
+                    self.assertEqual(image.rgba, b"\xff" * (200 * 200 * 4))
+            self.assertEqual([tuple(getattr(node, name) for name in fields) for node in (layer, inner)], before)
+            self.assertIsNone(renderer._capture_viewport)
+            self.assertIsNone(renderer._capture_pixel_scale)
+            self.assertEqual(renderer.screen_scale, self.window.scale)
+            after = gpu.resource_counts()
+            for name in ("textures", "buffers", "offscreen_command_buffers"):
+                self.assertEqual(after[name], resources[name], name)
+
+    def test_nearly_parallel_axes_fit_capture_texture_limits(self):
+        from scene import _capture
+
+        layer = Layer(affine_transform=(1, 0, 1, .001, 0, 0))
+        layer.add(Layer().add(Rect(100000, 100000, fill="#ffffff")))
+        self.scene.add(layer)
+        allocate = gpu.Texture.render_target
+        # Use smaller limits to exercise both fallbacks without retaining
+        # hundreds of megabytes of temporary GPU storage in the test suite.
+        for axis_limit, pixel_limit in ((512, 512 * 512), (1024, 128 * 128)):
+            with self.subTest(axis_limit=axis_limit, pixel_limit=pixel_limit):
+                def bounded_allocate(width, height, *args, **kwargs):
+                    self.assertLessEqual(max(width, height), axis_limit)
+                    self.assertLessEqual(width * height, pixel_limit)
+                    return allocate(width, height, *args, **kwargs)
+
+                with patch.object(_capture, "_MAX_TEXTURE_SIZE", axis_limit), \
+                     patch.object(_capture, "_MAX_CAPTURE_PIXELS", pixel_limit), \
+                     patch.object(gpu.Texture, "render_target", side_effect=bounded_allocate):
+                    image = self.scene.capture(rect=(-1, -1, 2, 2), size=(64, 64))
+                self.assertEqual(image.rgba, b"\xff" * (64 * 64 * 4))
 
 
 if __name__ == "__main__":
